@@ -140,4 +140,6 @@ node tests/e2e.cjs                    # Playwright workflow against a running de
 
 ## License
 
+Commercial subscriptions and support: see [docs/SUBSCRIPTION-MODEL.md](docs/SUBSCRIPTION-MODEL.md).
+
 Apache-2.0. The console reuses the Zyvor Netra stylesheets and marks, which Zyvor AI Labs licenses here under Apache-2.0; see [NOTICE](NOTICE). The Zyvor name and marks remain trademarks. Vendor SDKs, images, and firmware are not bundled and retain their own terms. [Security →](SECURITY.md) · [Contributing →](CONTRIBUTING.md)

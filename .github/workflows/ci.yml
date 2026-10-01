@@ -50,7 +50,8 @@ jobs:
       - run: helm lint helm/duvora
       - run: helm lint helm/duvora --set tls.enabled=true --set tls.cert=x --set tls.key=y
       - run: helm template duvora helm/duvora > /dev/null
-      - run: helm template duvora helm/duvora --set agent.enabled=true --set-json 'agent.keys={"node-1":"0123456789abcdef0123456789"}' | grep -q 'kind: DaemonSet'
+      - run: |
+          helm template duvora helm/duvora --set agent.enabled=true --set-json 'agent.keys={"node-1":"0123456789abcdef0123456789"}' | grep -q 'kind: DaemonSet'
       - run: bash -n scripts/deploy-remote.sh scripts/deploy-container.sh
       - run: ./scripts/deploy-remote.sh ci@example --dry-run | tail -n +2 | bash -n
       - run: ./scripts/deploy-remote.sh ci@example --docker --dry-run | tail -n +2 | bash -n

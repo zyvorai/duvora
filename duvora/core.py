@@ -106,14 +106,15 @@ class Store(AuthMixin, HistoryMixin, AlertsMixin, ReportsMixin, EbpfMixin):
             for d in devices:
                 if time.time() - d["last_seen"] > 120 and d["source"] != "simulator":
                     d["health"] = "stale"
+            native = any(self.native_fresh(d) for d in devices)
             return {"version": __version__, "demo": self.demo, "devices": devices,
                     "open_incidents": self.db.execute("SELECT count(*) FROM incidents WHERE state!='resolved'").fetchone()[0],
                     "policies": self.rows("policies"), "jobs": self.rows("jobs"), "netra": dict(self.netra),
                     "audit": [dict(seq=r["seq"], **json.loads(r["body"])) for r in self.db.execute("SELECT seq,body FROM audit ORDER BY seq DESC LIMIT 200")],
                     "capabilities": {"simulator": "available" if self.demo else "disabled",
                     "linux_discovery": "read-only", "dpf_import": "read-only",
-                    "ebpf_telemetry": ("connected" if self.netra["connected"] else "disconnected") if self.netra["configured"] else "unavailable",
-                    "hardware_enforcement": "netra-gated" if self.netra["enforce_allowed"] and self.netra["isolation_supported"] else "unavailable",
+                    "ebpf_telemetry": "native" if native else ("connected" if self.netra["connected"] else "disconnected") if self.netra["configured"] else "unavailable",
+                    "hardware_enforcement": ("native-gated" if native else "netra-gated") if self.netra["enforce_allowed"] and (native or self.netra["isolation_supported"]) else "unavailable",
                     "firmware_flash": "unavailable",
                     "storage_offload": "unavailable"}}
 
@@ -271,7 +272,7 @@ class Store(AuthMixin, HistoryMixin, AlertsMixin, ReportsMixin, EbpfMixin):
                         raise Problem("Enforcement is disabled on this server", 409)
                     if self.killed():
                         raise Problem("The kill switch is engaged", 409)
-                if not self.netra_client:
+                if not self.netra_client and any(self.provider(self.device(x)) == "netra" for x in p["spec"]["devices"]):
                     raise Problem("Netra is not configured", 409)
             elif not self.demo:
                 raise Problem("Simulation is disabled in this server", 409)

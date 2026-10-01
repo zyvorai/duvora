@@ -1,21 +1,36 @@
-"""eBPF observations from Netra, merged into Duvora devices without touching simulated state."""
+"""eBPF observations and node isolation from two providers, merged into Duvora devices without
+touching simulated state:
+
+  native  Duvora's own agent (duvora-agent --ebpf) loads duvora/bpf objects on the host, posts
+          counters to /api/v1/agent/ebpf and pulls desired isolation from /api/v1/agent/isolation.
+  netra   an optional Netra controller, polled by the netra_sync thread.
+
+DUVORA_EBPF_SOURCE=native|netra|auto picks the provider; in auto a fresh native report wins."""
 import ipaddress
 import json
 import os
 import re
 import threading
 import time
+from datetime import datetime, timezone
 
 from .common import Problem, canonical
-from .netra import NetraError, summarize, top_talkers
+from .netra import FLOW_WINDOW, NetraError, summarize, top_talkers
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ebpf_state(device TEXT PRIMARY KEY, body TEXT NOT NULL, updated REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS node_isolation(host TEXT PRIMARY KEY, body TEXT NOT NULL, revision INTEGER NOT NULL, lease_until REAL);
 """
 MEASURED = ("throughput_gbps", "pps", "blocked_pps", "drops", "tcp_retransmits_pm", "tcp_resets_pm")
 SOURCE = "netra-ebpf"
+NATIVE_SOURCE = "duvora-ebpf"
+EBPF_SOURCES = (SOURCE, NATIVE_SOURCE)
+PROVIDERS = {SOURCE: "netra", NATIVE_SOURCE: "native"}
+NATIVE_FRESH = 90
+NATIVE_FLOWS = 2000
 KILL_KEY = "_kill_switch"
 STAGES = ("shadow", "enforce")
+IFACE_NAME = re.compile(r"[A-Za-z0-9._@:-]{1,32}")
 
 
 def lease_seconds():
@@ -74,6 +89,70 @@ def replay(flows, cidr, ports):
     return out
 
 
+def _num(value):
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value < 2 ** 63 else 0
+
+
+def _text(value, limit=200):
+    return value[:limit] if isinstance(value, str) else ""
+
+
+def _parse_time(value):
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
+
+
+def native_summary(host, s):
+    """A native agent report, reduced to the netra.summarize() shape with every field type-checked."""
+    if not isinstance(s, dict):
+        raise Problem("summary must be an object")
+    out = {"node": host, "hostname": _text(s.get("hostname"), 64), "kernel": _text(s.get("kernel"), 64),
+           "stale": False, "age": 0, "mode": "observe", "btf": bool(s.get("btf")),
+           "programs": sorted({_text(p, 64) for p in (s.get("programs") or [])[:32] if _text(p, 64)}),
+           "program_count": int(_num(s.get("program_count"))), "attached": int(_num(s.get("attached"))),
+           "drops": _num(s.get("drops")), "nodeiso_available": bool(s.get("nodeiso_available")),
+           "drop_info_unavailable": _text(s.get("drop_info_unavailable")), "tcp_unavailable": _text(s.get("tcp_unavailable")),
+           "errors": [_text(e, 300) for e in (s.get("errors") or [])[:5] if _text(e, 300)], "interfaces": {}, "flows": []}
+    interfaces = s.get("interfaces") or {}
+    if not isinstance(interfaces, dict):
+        raise Problem("interfaces must be an object")
+    for name, v in list(interfaces.items())[:32]:
+        if IFACE_NAME.fullmatch(str(name)) and isinstance(v, dict):
+            out["interfaces"][str(name)] = {k: _num(v.get(k)) for k in ("packets", "bytes", "blocked")}
+    if isinstance(s.get("drop_reasons"), list):
+        out["drop_reasons"] = [{"reason": _text(r.get("reason"), 64) or "unknown", "count": _num(r.get("count"))}
+                               for r in s["drop_reasons"][:5] if isinstance(r, dict)]
+    if isinstance(s.get("tcp"), dict):
+        out["tcp"] = {k: _num(s["tcp"].get(k)) for k in ("retransmits", "resets")}
+    for r in (s.get("flows") or [])[:200]:
+        if not isinstance(r, dict):
+            continue
+        try:
+            peer = str(ipaddress.ip_address(str(r.get("peer"))))
+        except ValueError:
+            continue
+        port = r.get("port") if isinstance(r.get("port"), int) and 0 <= r["port"] <= 65535 else 0
+        out["flows"].append({"peer": peer, "port": port, "protocol": _text(r.get("protocol"), 16), "packets": _num(r.get("packets")),
+                             "bytes": _num(r.get("bytes")), "blocked": 0, "direction": "egress",
+                             "observedAt": _text(r.get("observedAt"), 32)})
+    iso = s.get("isolation")
+    if isinstance(iso, dict):
+        item = {k: _text(iso.get(k), 64) or None for k in ("policyId", "mode", "effectiveMode")}
+        item.update({k: iso.get(k) if isinstance(iso.get(k), (int, float)) and not isinstance(iso.get(k), bool) else None
+                     for k in ("revision", "appliedRevision", "leaseUntil")})
+        item.update({k: _num(iso.get(k)) for k in ("allowedPackets", "exemptPackets", "wouldBlockPackets", "wouldBlockBytes",
+                                                    "blockedPackets", "blockedBytes")})
+        item.update(demoted=_text(iso.get("demoted")), unavailable=_text(iso.get("unavailable")), agentStale=False,
+                    attached=bool(iso.get("attached")),
+                    top=[{"address": _text(t.get("address"), 64), "port": int(_num(t.get("port"))) & 0xFFFF,
+                          "protocol": _text(t.get("protocol"), 16), "packets": _num(t.get("packets")), "bytes": _num(t.get("bytes"))}
+                         for t in (iso.get("top") or [])[:5] if isinstance(t, dict)])
+        out["isolation"] = item
+    return out
+
+
 class EbpfMixin:
     def init_ebpf(self):
         self.db.executescript(SCHEMA)
@@ -89,39 +168,58 @@ class EbpfMixin:
         self.netra_discover = os.environ.get("DUVORA_NETRA_DISCOVER") == "1"
         self.netra_client = None
         self.netra_wake = threading.Event()
+        self.ebpf_source = os.environ.get("DUVORA_EBPF_SOURCE", "auto")
+        if self.ebpf_source not in {"native", "netra", "auto"}:
+            raise ValueError("DUVORA_EBPF_SOURCE must be native, netra or auto")
+        self.netra["enforce_allowed"] = "1" in {os.environ.get("DUVORA_EBPF_ENFORCE"), os.environ.get("DUVORA_NETRA_ENFORCE")}
+        self.controller_addresses = [a.strip() for a in os.environ.get("DUVORA_CONTROLLER_ADDRESSES", "").split(",") if a.strip()]
         row = self.db.execute("SELECT body FROM ebpf_state WHERE device=?", (KILL_KEY,)).fetchone()
         self.netra["kill_switch"] = json.loads(row[0]) if row else {"engaged": False}
 
     def configure_netra(self, url, enforce=False, client=None):
-        self.netra.update(configured=True, url=url, enforce_allowed=bool(enforce))
+        self.netra.update(configured=True, url=url, enforce_allowed=bool(enforce) or self.netra["enforce_allowed"])
         self.netra_client = client
 
     def netra_node(self, d):
-        """The Netra node behind a device, or None (simulators never have one)."""
+        """The eBPF node behind a device (Netra node or native host), or None (simulators never have one)."""
         return d.get("ebpf", {}).get("node") if d["source"] != "simulator" else None
+
+    @staticmethod
+    def provider(d):
+        return d.get("ebpf", {}).get("provider") or "netra"
+
+    def native_fresh(self, d, now=None):
+        e = d.get("ebpf") or {}
+        return e.get("provider") == "native" and (now or time.time()) - (e.get("updated") or 0) < NATIVE_FRESH
 
     def killed(self):
         return bool(self.netra["kill_switch"].get("engaged"))
 
     def netra_plan(self, spec, devices):
-        """Mode, confirmation, effects and blockers for a plan whose targets are Netra-backed."""
+        """Mode, confirmation, effects and blockers for a plan whose targets are eBPF-backed (native or Netra)."""
         action, stage = spec["action"], spec.get("stage", "shadow")
         blockers = []
+        providers = {self.provider(d) for d in devices}
         if action not in {"isolate", "release"}:
-            blockers.append("Netra-backed devices support isolate and release only")
-        if not self.netra.get("connected"):
-            blockers.append("Netra is not connected")
-        elif not self.netra.get("isolation_supported"):
-            blockers.append("This Netra has no node isolation API; upgrade Netra")
+            blockers.append("eBPF-backed devices support isolate and release only")
+        if "netra" in providers:
+            if not self.netra.get("connected"):
+                blockers.append("Netra is not connected")
+            elif not self.netra.get("isolation_supported"):
+                blockers.append("This Netra has no node isolation API; upgrade Netra")
         for d in devices:
             e = d.get("ebpf", {})
+            native = self.provider(d) == "native"
             if not e.get("nodeiso_available"):
-                blockers.append(f"{d['id']}: netra_nodeiso is not attached on node {e.get('node')}")
-            if e.get("stale"):
+                why = (e.get("isolation") or {}).get("unavailable")
+                blockers.append(f"{d['id']}: node isolation is not attached on {e.get('node')}" + (f" ({why})" if why else ""))
+            if native and not self.native_fresh(d):
+                blockers.append(f"{d['id']}: the Duvora agent on {e.get('node')} has not reported for {NATIVE_FRESH} s")
+            if not native and e.get("stale"):
                 blockers.append(f"{d['id']}: the Netra agent on {e.get('node')} is stale")
             current = d.get("netra_isolation")
             if action == "release" and not current:
-                blockers.append(f"{d['id']}: no Netra isolation to release")
+                blockers.append(f"{d['id']}: no node isolation to release")
             if action == "isolate" and stage == "enforce":
                 wanted = {k: spec["policy"][k] for k in ("cidr", "ports")}
                 if not current or {k: current["policy"][k] for k in ("cidr", "ports")} != wanted:
@@ -133,26 +231,95 @@ class EbpfMixin:
                 blockers.append("The kill switch is engaged")
             if len(devices) != 1:
                 blockers.append("Enforce one device at a time")
+        prefix = providers.pop() if len(providers) == 1 else "ebpf"
+        where = "the Duvora agent's node" if prefix == "native" else "the Netra node" if prefix == "netra" else "each node"
         if action == "isolate":
-            mode = f"netra-{stage}"
+            mode = f"{prefix}-{stage}"
             confirmation = f"ENFORCE ON {devices[0]['id']}" if stage == "enforce" else "APPLY SHADOW"
-            effects = (f"Drop new outbound flows outside {spec['policy']['cidr']} on the Netra node for a "
+            effects = (f"Drop new outbound flows outside {spec['policy']['cidr']} on {where} for a "
                        f"{lease_seconds() // 60}-minute lease, renewed while Duvora runs; falls back to shadow"
                        if stage == "enforce" else
-                       "Count, in the kernel, what this allow-list would block on the Netra node; nothing is dropped")
+                       f"Count, in the kernel, what this allow-list would block on {where}; nothing is dropped")
         else:
-            mode, confirmation, effects = "netra-release", "APPLY RELEASE", "Remove the Netra node isolation from the selected devices"
+            mode, confirmation, effects = f"{prefix}-release", "APPLY RELEASE", "Remove node isolation from the selected devices"
         return mode, confirmation, effects, blockers
 
     def netra_body(self, ni, stage):
         return {"policyId": ni["policy_id"], "mode": stage, "rules": isolation_rules(ni["policy"]["cidr"], ni["policy"]["ports"])}
 
     def _netra_put(self, client, ni, stage):
-        lease = f"{lease_seconds()}s" if stage == "enforce" else None
-        out = client.put_isolation(ni["node"], self.netra_body(ni, stage), lease)
-        until = out.get("leaseUntil")
-        return {**ni, "stage": stage, "revision": out.get("revision"), "updated": time.time(),
-                "lease_until": time.time() + lease_seconds() if stage == "enforce" and until else None}
+        """Set a device's isolation through its provider: the native table or the Netra API."""
+        lease = lease_seconds() if stage == "enforce" else None
+        if ni.get("provider") == "native":
+            revision, until = self._native_put(ni["node"], self.netra_body(ni, stage), lease)
+        else:
+            if not client:
+                raise NetraError("Netra is not configured")
+            out = client.put_isolation(ni["node"], self.netra_body(ni, stage), f"{lease}s" if lease else None)
+            revision, until = out.get("revision"), out.get("leaseUntil")
+        return {**ni, "stage": stage, "revision": revision, "updated": time.time(),
+                "lease_until": time.time() + lease if lease and until else None}
+
+    def _isolation_delete(self, client, provider, node):
+        if provider == "native":
+            with self.transaction():
+                self.db.execute("DELETE FROM node_isolation WHERE host=?", (node,))
+            return
+        if not client:
+            raise NetraError("Netra is not configured")
+        client.delete_isolation(node)
+
+    def _native_put(self, host, body, lease):
+        """Desired isolation for a native agent; each change bumps the revision the agent reports back."""
+        with self.transaction():
+            row = self.db.execute("SELECT revision FROM node_isolation WHERE host=?", (host,)).fetchone()
+            revision = (row[0] if row else 0) + 1
+            until = time.time() + lease if lease else None
+            body = {**body, "revision": revision, "leaseUntil": until}
+            self.db.execute("INSERT INTO node_isolation VALUES(?,?,?,?) ON CONFLICT(host) DO UPDATE SET "
+                            "body=excluded.body, revision=excluded.revision, lease_until=excluded.lease_until",
+                            (host, canonical(body), revision, until))
+            return revision, until
+
+    def agent_isolation(self, actor):
+        """GET /agent/isolation: the desired node isolation for the calling agent's host."""
+        host = actor.split(":", 1)[1] if actor.startswith("agent:") else ""
+        if not host:
+            raise Problem("Only agent keys read node isolation", 403)
+        if self.ebpf_source == "netra":
+            return {"host": host, "isolation": None, "controller": self.controller_addresses, "now": time.time()}
+        with self.lock:
+            row = self.db.execute("SELECT body FROM node_isolation WHERE host=?", (host,)).fetchone()
+        return {"host": host, "isolation": json.loads(row[0]) if row else None,
+                "controller": self.controller_addresses, "lease_seconds": lease_seconds(), "now": time.time()}
+
+    def ingest_native(self, actor, body):
+        """POST /agent/ebpf: merge one native agent report into the device for its host."""
+        if not isinstance(body, dict) or set(body) - {"host", "summary"}:
+            raise Problem("Report must contain host and summary")
+        host = body.get("host")
+        if not isinstance(host, str) or actor != f"agent:{host}":
+            raise Problem("Agent hostname does not match its key", 403)
+        if self.ebpf_source == "netra":
+            raise Problem("Native eBPF reports are disabled (DUVORA_EBPF_SOURCE=netra)", 409)
+        s = native_summary(host, body.get("summary"))
+        now = time.time()
+        with self.transaction():
+            candidates = [d for d in self.rows("devices") if d["host"] == host and d["source"] != "simulator"]
+            rank = lambda d: (self.provider(d) != "native" or not d.get("ebpf"), d["source"] != NATIVE_SOURCE,
+                              d["source"] != SOURCE, d["id"])
+            d = min(candidates, key=rank) if candidates else None
+            if not d:
+                d = {"id": "ebpf-" + node_slug(host), "model": "Linux host (native eBPF)", "host": host, "site": "unassigned",
+                     "source": NATIVE_SOURCE, "firmware": "unknown", "health": "unknown", "metrics": {}, "interfaces": [],
+                     "last_seen": now, "version": 1, "mode": "observe", "services": [], "policy_ids": [],
+                     "capabilities": ["read-only", "ebpf"]}
+                self.event(actor, "device.discovered", {"id": d["id"], "source": NATIVE_SOURCE, "host": host})
+            cutoff = now - 3600
+            kept = [r for r in self.netra_flows.get(d["id"], []) if (_parse_time(r.get("observedAt")) or 0) >= cutoff]
+            s["flows"] = (s["flows"] + kept)[:NATIVE_FLOWS]
+            self.ingest_node(d, s, now, provider="native")
+            return {"device": d["id"], "provider": "native"}
 
     def _set_isolation(self, d, ni, job_id=None):
         """Record a device's Netra isolation (or its removal, ni=None) and the matching policy row."""
@@ -170,7 +337,7 @@ class EbpfMixin:
             row = self.db.execute("SELECT body FROM policies WHERE id=?", (pid,)).fetchone()
             policy = json.loads(row[0]) if row else {"id": pid, **ni["policy"], "devices": [], "created": time.time()}
             policy["devices"] = sorted(set(policy["devices"]) | {d["id"]})
-            policy["mode"] = f"netra-{ni['stage']}"
+            policy["mode"] = f"{ni.get('provider', 'netra')}-{ni['stage']}"
             self.put("policies", pid, policy)
             d["netra_isolation"], d["mode"], d["policy_ids"] = ni, "isolated" if ni["stage"] == "enforce" else "shadow", [pid]
         else:
@@ -233,12 +400,17 @@ class EbpfMixin:
                     devices[ident] = d
                     matched[node] = ident
             self.netra["unmatched"] = sorted(set(summary) - set(matched))
+            if self.ebpf_source == "native":
+                return self.netra
             listed = raw.get("isolation") is not None and "isolation" not in raw.get("errors", {})
             for node, ident in matched.items():
-                self._merge_node(devices[ident], summary[node], now, listed)
+                if self.native_fresh(devices[ident], now):
+                    continue
+                self.ingest_node(devices[ident], summary[node], now, "netra", listed)
             return self.netra
 
-    def _merge_node(self, d, s, now, isolation_listed=False):
+    def ingest_node(self, d, s, now, provider="netra", isolation_listed=False):
+        """Merge one node summary (netra.summarize() shape) from either provider into device `d`."""
         row = self.db.execute("SELECT body FROM ebpf_state WHERE device=?", (d["id"],)).fetchone()
         prev = json.loads(row[0]) if row else None
         counters = {"bytes": sum(i["bytes"] for i in s["interfaces"].values()),
@@ -271,7 +443,9 @@ class EbpfMixin:
                         (d["id"], canonical(counters), now))
         self.netra_flows[d["id"]] = s["flows"]
         isolation = s.get("isolation")
+        source = NATIVE_SOURCE if provider == "native" else SOURCE
         d["ebpf"] = {
+            "provider": provider, "errors": s.get("errors", []),
             "node": s["node"], "stale": s.get("stale", False), "age": s.get("age", 0), "kernel": s.get("kernel", ""),
             "btf": s.get("btf"), "programs": s["programs"], "program_count": s.get("program_count", 0),
             "attached": s.get("attached", 0), "mode": s.get("mode", "observe"), "interfaces": sorted(s["interfaces"]),
@@ -290,13 +464,13 @@ class EbpfMixin:
                 "would_block_delta": counters.get("would_block_delta", 0), "blocked_delta": counters.get("blocked_delta", 0),
                 "top": (isolation.get("top") or [])[:5]},
             "updated": now}
-        if isolation_listed:
+        if isolation_listed and (d.get("netra_isolation") or {}).get("provider", "netra") == provider:
             self._isolation_drift(d, isolation, now)
         if measured:
             d["metrics"] = {**d.get("metrics", {}), **measured}
-            d["metrics_source"] = SOURCE
+            d["metrics_source"] = source
             self.record_sample(d["id"], d["metrics"], now)
-        if d["source"] == SOURCE:
+        if d["source"] in EBPF_SOURCES:
             d["interfaces"] = sorted(s["interfaces"])[:32]
             d["health"] = "unknown" if s.get("stale") else ("healthy" if s.get("attached", 0) else "degraded")
             if not s.get("stale"):
@@ -306,11 +480,9 @@ class EbpfMixin:
         self.put("devices", d["id"], d)
 
     def netra_duties(self, client=None):
-        """Run queued Netra jobs, hold the kill switch, and renew enforce leases. Netra calls happen
-        outside the store lock; results are written back under it."""
+        """Run queued eBPF isolation jobs, hold the kill switch, and renew enforce leases, for both
+        providers. Netra calls happen outside the store lock; results are written back under it."""
         client = client or self.netra_client
-        if not client:
-            return
         self._run_netra_jobs(client)
         if self.killed():
             self._demote_all(client, "kill switch")
@@ -329,11 +501,12 @@ class EbpfMixin:
             for ident, d in devices.items():
                 try:
                     if spec["action"] == "release":
-                        client.delete_isolation(d["netra_isolation"]["node"])
+                        ni = d["netra_isolation"]
+                        self._isolation_delete(client, ni.get("provider", "netra"), ni["node"])
                         results[ident] = None
                     else:
-                        ni = {"node": self.netra_node(d), "policy_id": f"duvora-{job['id'][:16]}", "job": job["id"],
-                              "policy": spec["policy"], "lease_until": None}
+                        ni = {"node": self.netra_node(d), "provider": self.provider(d), "policy_id": f"duvora-{job['id'][:16]}",
+                              "job": job["id"], "policy": spec["policy"], "lease_until": None}
                         results[ident] = self._netra_put(client, ni, spec.get("stage", "shadow"))
                 except (NetraError, KeyError, TypeError) as exc:
                     results[ident] = exc
@@ -402,14 +575,12 @@ class EbpfMixin:
                             (KILL_KEY, canonical(state), state["at"]))
             self.netra["kill_switch"] = state
             self.event(actor, "ebpf.kill-switch", {"engaged": engaged})
-        demoted = self._demote_all(self.netra_client, "kill switch") if engaged and self.netra_client else {}
+        demoted = self._demote_all(self.netra_client, "kill switch") if engaged else {}
         return {**state, "demoted": sorted(k for k, v in demoted.items() if v is None),
                 "errors": {k: v for k, v in demoted.items() if v}}
 
     def netra_rollback(self, actor, job):
-        """Undo a Netra job: restore each device's previous isolation, but never re-enforce."""
-        if not self.netra_client:
-            raise Problem("Netra is not configured", 409)
+        """Undo an eBPF isolation job: restore each device's previous isolation, but never re-enforce."""
         with self.lock:
             for d in job["before"]:
                 current = self.device(d["id"])
@@ -426,10 +597,11 @@ class EbpfMixin:
                 if prev:
                     restored[d["id"]] = self._netra_put(self.netra_client, prev, "shadow")
                 else:
-                    self.netra_client.delete_isolation(self.netra_node(d))
+                    after = self.device(d["id"]).get("netra_isolation") or {}
+                    self._isolation_delete(self.netra_client, after.get("provider") or self.provider(d), self.netra_node(d))
                     restored[d["id"]] = None
             except NetraError as exc:
-                raise Problem(f"Netra refused the rollback for {d['id']}: {exc}", 502) from None
+                raise Problem(f"The isolation provider refused the rollback for {d['id']}: {exc}", 502) from None
         with self.transaction():
             for ident, ni in restored.items():
                 self._set_isolation(self.device(ident), ni)
@@ -454,10 +626,14 @@ class EbpfMixin:
     def ebpf_overview(self):
         with self.lock:
             devices = [d for d in self.rows("devices") if d.get("ebpf")]
-            return {"netra": dict(self.netra), "devices": [
+            now = time.time()
+            return {"netra": dict(self.netra), "source": self.ebpf_source,
+                    "native": {"agents": sum(self.native_fresh(d, now) for d in devices)}, "devices": [
                 {"id": d["id"], "host": d["host"], "source": d["source"], "metrics_source": d.get("metrics_source"),
-                 **{k: d["ebpf"][k] for k in ("node", "stale", "kernel", "btf", "programs", "attached", "mode", "nodeiso_available",
-                                               "drop_info_unavailable", "tcp_unavailable", "isolation", "updated")},
+                 "provider": self.provider(d), "errors": d["ebpf"].get("errors", []),
+                 "stale": d["ebpf"].get("stale") or (self.provider(d) == "native" and not self.native_fresh(d, now)),
+                 **{k: d["ebpf"].get(k) for k in ("node", "kernel", "btf", "programs", "attached", "mode", "nodeiso_available",
+                                                  "drop_info_unavailable", "tcp_unavailable", "isolation", "updated")},
                  "netra_isolation": d.get("netra_isolation")}
                 for d in devices]}
 
@@ -465,6 +641,6 @@ class EbpfMixin:
         with self.lock:
             d = self.device(device_id)
             if not d.get("ebpf"):
-                raise Problem("No eBPF observations for this device; is it matched to a Netra node?", 404)
+                raise Problem("No eBPF observations for this device; run duvora-agent --ebpf on its host or match it to a Netra node", 404)
             return {"device": device_id, "metrics": {k: d["metrics"][k] for k in MEASURED if k in d["metrics"]},
-                    "metrics_source": d.get("metrics_source"), **d["ebpf"]}
+                    "metrics_source": d.get("metrics_source"), "provider": self.provider(d), **d["ebpf"]}

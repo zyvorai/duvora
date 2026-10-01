@@ -1,7 +1,18 @@
-.PHONY: demo run test check package install web web-dev web-test deploy deploy-docker helm-lint
+.PHONY: demo run test check package install web web-dev web-test deploy deploy-docker helm-lint bpf bpf-test
 PYTHON ?= python3
 NPM ?= npm
 HOST ?=
+CLANG ?= clang
+BPF_ARCH_INCLUDE ?= /usr/include/$(shell uname -m)-linux-gnu
+BPF_SOURCES := $(wildcard bpf/duvora_*.c)
+BPF_OBJECTS := $(patsubst bpf/%.c,duvora/bpf/obj/%.o,$(BPF_SOURCES))
+
+bpf: $(BPF_OBJECTS)
+duvora/bpf/obj/%.o: bpf/%.c bpf/duvora_bpf.h
+	@mkdir -p duvora/bpf/obj
+	$(CLANG) -O2 -g -Wall -target bpf -I$(BPF_ARCH_INCLUDE) -c $< -o $@
+bpf-test: bpf
+	sudo DUVORA_BPF_TESTS=1 $(PYTHON) -m unittest tests.test_bpf_kernel -v
 
 demo:
 	$(PYTHON) -m duvora.server --demo
@@ -24,6 +35,7 @@ check: test
 	bash -n scripts/deploy-remote.sh scripts/deploy-container.sh
 	@if [ -d web/node_modules ]; then $(MAKE) web-test; else echo "skip web-test (run make web first)"; fi
 	@if command -v helm >/dev/null 2>&1; then $(MAKE) helm-lint; else echo "skip helm-lint (helm not installed)"; fi
+	@if [ "$$(uname)" = Linux ] && command -v $(CLANG) >/dev/null 2>&1; then $(MAKE) bpf; else echo "skip bpf (needs Linux and clang)"; fi
 package:
 	$(PYTHON) scripts/package.py
 install:

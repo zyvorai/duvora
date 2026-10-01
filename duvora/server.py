@@ -45,6 +45,8 @@ class Application:
         r("GET", "/session", "agent", lambda c: {"actor": c.actor, "role": c.role, "demo": self.store.demo})
         r("GET", "/whoami", "agent", self.whoami)
         r("POST", "/reports", "agent-only", lambda c: self.store.report(c.actor, c.body))
+        r("POST", "/agent/ebpf", "agent-only", lambda c: self.store.ingest_native(c.actor, c.body))
+        r("GET", "/agent/isolation", "agent-only", lambda c: self.store.agent_isolation(c.actor))
         r("GET", "/snapshot", "viewer", lambda c: self.store.snapshot())
         r("GET", "/export", "viewer", lambda c: self.store.snapshot())
         r("GET", "/metrics", "viewer", self.metrics)
@@ -108,7 +110,7 @@ class Application:
     def metrics(self, c):
         snapshot = self.store.snapshot()
         lines = ["# HELP duvora_devices Device inventory by observation source", "# TYPE duvora_devices gauge"]
-        for source in ("simulator", "linux-pci", "nvidia-dpf", "netra-ebpf"):
+        for source in ("simulator", "linux-pci", "nvidia-dpf", "netra-ebpf", "duvora-ebpf"):
             lines.append(f'duvora_devices{{source="{source}"}} {sum(d["source"] == source for d in snapshot["devices"])}')
         lines += ["# TYPE duvora_jobs gauge", f'duvora_jobs {len(snapshot["jobs"])}',
                   "# TYPE duvora_open_incidents gauge", f'duvora_open_incidents {snapshot["open_incidents"]}']
@@ -281,11 +283,17 @@ def handler(app, tls=False):
 
 def load_keys():
     raw = os.environ.get("DUVORA_KEYS", "")
-    if not raw:
-        return {}
-    data = json.loads(raw)
-    if not isinstance(data, dict) or not data:
+    data = json.loads(raw) if raw else {}
+    if raw and (not isinstance(data, dict) or not data):
         raise ValueError("DUVORA_KEYS must be a non-empty JSON object")
+    # Host-bound agent keys for a fleet (the Helm agent DaemonSet): {"host": "token"}.
+    agents = json.loads(os.environ.get("DUVORA_AGENT_KEYS") or "{}")
+    if not isinstance(agents, dict):
+        raise ValueError("DUVORA_AGENT_KEYS must be a JSON object of host to token")
+    for host, token in agents.items():
+        data.setdefault(f"agent:{host}", {"role": "agent", "token": token})
+    if not data:
+        return {}
     keys = {}
     for actor, value in data.items():
         if not isinstance(actor, str) or len(actor) > 128 or not isinstance(value, dict):
@@ -302,16 +310,17 @@ def load_keys():
 
 
 def netra_sync(store, client, stop, interval=None):
-    """Poll Netra outside the store lock, then merge; also carries isolation duties to Netra."""
+    """Poll Netra (when configured) outside the store lock, then merge; also runs isolation duties
+    (jobs, kill switch, lease renewal) for both the native and the Netra provider."""
     interval = interval or max(5, int(os.environ.get("DUVORA_NETRA_INTERVAL", "15") or 15))
     while True:
         try:
-            raw = collect(client, store.netra_wanted_nodes())
-            store.ingest_netra(raw)
+            if client:
+                store.ingest_netra(collect(client, store.netra_wanted_nodes()))
             store.netra_duties(client)
         except Exception as exc:
-            print(f"Netra sync error: {type(exc).__name__}: {exc}"[:300], flush=True)
-        # Applied Netra jobs wake the loop so they do not wait a whole polling interval.
+            print(f"eBPF sync error: {type(exc).__name__}: {exc}"[:300], flush=True)
+        # Applied jobs wake the loop so they do not wait a whole polling interval.
         for _ in range(interval):
             if stop.wait(1):
                 return
@@ -320,7 +329,7 @@ def netra_sync(store, client, stop, interval=None):
                 try:
                     store.netra_duties(client)
                 except Exception as exc:
-                    print(f"Netra job error: {type(exc).__name__}: {exc}"[:300], flush=True)
+                    print(f"eBPF job error: {type(exc).__name__}: {exc}"[:300], flush=True)
 
 
 def main():
@@ -365,8 +374,7 @@ def main():
 
     worker = threading.Thread(target=reconcile, daemon=True)
     worker.start()
-    if netra:
-        threading.Thread(target=netra_sync, args=(store, netra, stop), daemon=True).start()
+    threading.Thread(target=netra_sync, args=(store, netra, stop), daemon=True).start()
 
     def shutdown(*_):
         threading.Thread(target=httpd.shutdown, daemon=True).start()

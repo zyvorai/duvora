@@ -16,6 +16,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- .Values.auth.existingSecret | default (printf "%s-auth" .Release.Name) -}}
 {{- end -}}
 
+{{- define "duvora.agentSecretName" -}}
+{{- .Values.agent.existingSecret | default (printf "%s-agent" .Release.Name) -}}
+{{- end -}}
+
+{{- define "duvora.agentKeysEnabled" -}}
+{{- if or .Values.agent.existingSecret .Values.agent.keys }}true{{ end -}}
+{{- end -}}
+
 {{- define "duvora.tlsSecretName" -}}
 {{- .Values.tls.existingSecret | default (printf "%s-tls" .Release.Name) -}}
 {{- end -}}

@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/zyvorai/duvora
-  tag: "0.3.0"
+  tag: "0.4.0"
   pullPolicy: IfNotPresent
 
 auth:
@@ -23,8 +23,42 @@ tls:
 
 auditRetentionDays: 90
 
-# Netra bridge: eBPF telemetry, drop reasons, TCP health, talkers, and node isolation.
-# Empty url disables it. See docs/EBPF.md.
+# eBPF on the control plane side. See docs/EBPF.md.
+ebpf:
+  source: auto             # native, netra, or auto (a fresh native agent report wins)
+  enforce: false           # allow promoting shadow isolation to enforcement (either provider)
+  leaseSeconds: 900        # enforce lease; renewed while Duvora runs, nodes fall back to shadow without it
+  controllerAddresses: ""  # comma-separated addresses every agent always allows under isolation
+
+# Native eBPF host agent (duvora-agent --ebpf), one pod per node. Disabled by default.
+agent:
+  enabled: false
+  image:
+    repository: ghcr.io/zyvorai/duvora-agent
+    tag: "0.4.0"
+    pullPolicy: IfNotPresent
+  ebpf: auto               # auto loads what it can; required fails the pod instead
+  interfaces: ""           # comma-separated; default: the interfaces carrying a default route
+  isolation: true          # load node isolation (off/shadow/enforce come from the control plane)
+  intervalSeconds: 15
+  failsafeSeconds: 60      # enforce falls back to shadow after this long without the control plane
+  url: ""                  # default: the Duvora service inside the cluster
+  # Host-bound keys: node name -> token (24+ characters). Each becomes agent:<node> on the server.
+  keys: {}
+  existingSecret: ""       # Secret with key agent-keys.json (the same JSON) instead of keys
+  nodeSelector: {}
+  tolerations:
+    - operator: Exists
+  resources:
+    requests:
+      cpu: 20m
+      memory: 48Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Netra bridge (optional): eBPF telemetry, drop reasons, TCP health, talkers, and node isolation
+# from a Netra controller. Empty url disables it. See docs/EBPF.md.
 netra:
   url: ""                # e.g. https://netra.netra-system.svc:30870 (HTTPS unless loopback)
   apiKey: ""             # a Netra admin key is needed for node isolation; viewer keys observe only
@@ -32,8 +66,7 @@ netra:
   existingSecret: ""     # Secret with keys netra-api-key and optional netra-ca.crt
   discover: true         # add a device per Netra node that matches no Duvora device
   nodeMap: ""            # JSON object of Duvora device id or host to Netra node
-  enforce: false         # allow promoting shadow isolation to enforcement
-  leaseSeconds: 900      # enforce lease; Duvora renews it, Netra falls back to shadow without it
+  enforce: false         # allow promoting shadow isolation to enforcement (same as ebpf.enforce)
   intervalSeconds: 15
 
 service:

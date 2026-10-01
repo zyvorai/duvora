@@ -269,7 +269,7 @@ function Console({
         onApplied={(job) => {
           closeDialog();
           if (job.mode === 'netra') {
-            toast(`Netra job queued: ${job.action}${job.spec.stage ? ` (${String(job.spec.stage)})` : ''}`);
+            toast(`Kernel isolation job queued: ${job.action}${job.spec.stage ? ` (${String(job.spec.stage)})` : ''}`);
             goPage('isolation');
           } else {
             toast(`Simulation job queued: ${job.action}`);

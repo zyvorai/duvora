@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0
+
+- Native eBPF, no sidecar: `duvora-agent --ebpf auto|required` loads Duvora's own programs through the system libbpf (Python ctypes, libbpf 1.3 or later). New Apache-2.0 BPF sources in `bpf/`, compiled by `make bpf` and shipped in `duvora/bpf/obj/`:
+  - `duvora_iface`: TCX ingress and egress counters and an egress flow table for top talkers, attached at the head of the chain (works beside Cilium).
+  - `duvora_drops`: kernel drop reasons from `tp_btf/kfree_skb`, named from the tracepoint format.
+  - `duvora_tcp`: TCP retransmits, resets sent and received.
+  - `duvora_nodeiso`: allow-only egress node isolation (off, shadow, enforce) with generation-swapped rules.
+- The agent reports to `POST /api/v1/agent/ebpf` and pulls desired isolation from `GET /api/v1/agent/isolation` (both host-bound agent keys). Native hosts appear as `ebpf-<host>` devices (source `duvora-ebpf`) or merge into an existing device for the host.
+- Agent-side safety: enforce falls back to shadow when the lease lapses or the control plane is unreachable for `DUVORA_EBPF_FAILSAFE` seconds (60); an override file (`/run/duvora/isolation-off`) turns isolation off locally.
+- `DUVORA_EBPF_SOURCE=native|netra|auto` (default `auto`, native wins). Netra stays as an optional provider; plans, gates, confirmations, leases, kill switch and rollback work the same for both. `DUVORA_EBPF_ENFORCE=1` enables enforcement (`DUVORA_NETRA_ENFORCE=1` still works).
+- Console and `GET /api/v1/ebpf` show each device's provider (native agent or Netra); policy and plan modes are `native-*` or `netra-*`.
+- `DUVORA_AGENT_KEYS` (host to token) for fleets of agents; `DUVORA_CONTROLLER_ADDRESSES` for addresses agents always allow.
+- Packaging: `Dockerfile.agent` (clang build stage, `python:3.12-slim` with `libbpf1`), Helm `agent.*` DaemonSet (disabled by default), `deploy-remote.sh` `DUVORA_AGENT=1`.
+- Tests: rule encoding, map decoding, drop-reason parsing, native ingest and isolation backend, agent fail-safe; Linux kernel tests (`make bpf-test`) for loading, BPF_PROG_TEST_RUN verdicts, generation swap and real UDP over a veth pair; a `bpf` CI job (ubuntu-24.04) and an agent image build in CI.
+- Validated live on Linux 7.0 with k3s and Cilium (libbpf 1.6): native telemetry, then shadow, enforce, kill switch, release, rollback and the local override, with SSH, DNS, HTTPS and the controller reachable throughout.
+
 ## 0.3.0
 
 - Netra bridge (`DUVORA_NETRA_URL`, `DUVORA_NETRA_API_KEY`): kernel-measured throughput, packets per second, drops with kernel drop reasons, TCP retransmits and resets, and top talkers, merged into devices and telemetry history. Devices map to Netra nodes by `DUVORA_NETRA_NODE_MAP`, host name, or discovery (`DUVORA_NETRA_DISCOVER=1`).

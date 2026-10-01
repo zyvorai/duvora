@@ -60,6 +60,23 @@ spec:
                   name: {{ include "duvora.secretName" . }}
                   key: keys.json
                   optional: true
+            {{- if include "duvora.agentKeysEnabled" . }}
+            - name: DUVORA_AGENT_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "duvora.agentSecretName" . }}
+                  key: agent-keys.json
+            {{- end }}
+            - name: DUVORA_EBPF_SOURCE
+              value: {{ .Values.ebpf.source | quote }}
+            - name: DUVORA_EBPF_ENFORCE
+              value: {{ ternary "1" "0" .Values.ebpf.enforce | quote }}
+            - name: DUVORA_NETRA_LEASE
+              value: {{ .Values.ebpf.leaseSeconds | quote }}
+            {{- with .Values.ebpf.controllerAddresses }}
+            - name: DUVORA_CONTROLLER_ADDRESSES
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.netra.url }}
             - name: DUVORA_NETRA_URL
               value: {{ .Values.netra.url | quote }}
@@ -80,8 +97,6 @@ spec:
             {{- end }}
             - name: DUVORA_NETRA_ENFORCE
               value: {{ ternary "1" "0" .Values.netra.enforce | quote }}
-            - name: DUVORA_NETRA_LEASE
-              value: {{ .Values.netra.leaseSeconds | quote }}
             - name: DUVORA_NETRA_INTERVAL
               value: {{ .Values.netra.intervalSeconds | quote }}
             {{- end }}

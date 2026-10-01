@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Badge, Empty, Section, Sparkline, Table } from '../components/kit';
-import { bytes, metric, sourceLabel, when } from '../lib/format';
+import { bytes, metric, providerLabel, sourceLabel, when } from '../lib/format';
 import { useFleet, useResource } from '../store';
 import type { History, HistoryPoint } from '../types';
 
@@ -88,7 +88,7 @@ export default function Telemetry() {
                   <strong>{x.id}</strong>
                   <small className="dv-sub">
                     {sourceLabel(x.source)}
-                    {x.metrics_source === 'netra-ebpf' ? ' · measured by Netra eBPF' : ''}
+                    {x.metrics_source === 'netra-ebpf' ? ' · measured by Netra eBPF' : x.metrics_source === 'duvora-ebpf' ? ' · measured by native eBPF' : ''}
                   </small>
                 </td>
                 <td>
@@ -107,7 +107,7 @@ export default function Telemetry() {
         )}
       </Section>
       {kernel.length > 0 && (
-        <Section span={3} eyebrow="KERNEL" title="Kernel observations" lede="From Netra's eBPF programs on each device's node: why packets drop, TCP health, and who the node talks to.">
+        <Section span={3} eyebrow="KERNEL" title="Kernel observations" lede="From eBPF programs on each device's node (the native Duvora agent or Netra): why packets drop, TCP health, and who the node talks to.">
           <Table heads={['Device / node', 'Packets / s', 'TCP retransmits · resets / min', 'Top drop reasons', 'Top talkers (last 15 min)']} label="Kernel observations">
             {kernel.map((x) => {
               const e = x.ebpf!;
@@ -116,7 +116,7 @@ export default function Telemetry() {
                   <td>
                     <strong>{x.id}</strong>
                     <small className="dv-sub">
-                      {e.node} · {e.kernel || 'kernel unknown'} {e.stale && <Badge tone="bad">stale</Badge>}
+                      {e.node} · {providerLabel(e.provider)} · {e.kernel || 'kernel unknown'} {e.stale && <Badge tone="bad">stale</Badge>}
                     </small>
                   </td>
                   <td>{metric(x.metrics.pps)}</td>

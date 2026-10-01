@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
-import { bytes, metric, parsePorts, sourceLabel, when } from '../lib/format';
+import { bytes, metric, parsePorts, providerLabel, sourceLabel, when } from '../lib/format';
 import { useFleet, useResource, type DialogState, type PlanAction, type PlanPreset } from '../store';
 import type { Device, History, Job, Plan } from '../types';
 import { Badge, Sparkline, Table } from './kit';
@@ -73,7 +73,7 @@ function Inspect({ device: d, onClose }: { device: Device; onClose: () => void }
   if (d.ebpf) {
     const e = d.ebpf;
     rows.push(
-      ['Netra node', `${e.node}${e.stale ? ' (agent stale)' : ''}`],
+      [`${providerLabel(e.provider)} node`, `${e.node}${e.stale ? ' (agent stale)' : ''}`],
       ['Kernel', `${e.kernel || 'Unknown'} · BTF ${e.btf === null ? 'unknown' : e.btf ? 'yes' : 'no'}`],
       ['eBPF programs', `${e.attached} attached · ${e.programs.join(', ') || 'none reported'}`],
       ['Packets / s', metric(d.metrics.pps)],
@@ -222,8 +222,8 @@ function PlanForm({
             )}
             {netra && (
               <p className="dv-fine">
-                Netra applies this as node isolation in the kernel. Shadow never drops. Enforce needs a shadow run of the same allow-list, holds a renewable lease, and falls back to shadow if
-                Duvora or the controller goes away. SSH (22), ICMP, DHCP and the Netra controller stay reachable.
+                The node&apos;s eBPF provider (native agent or Netra) applies this as node isolation in the kernel. Shadow never drops. Enforce needs a shadow run of the same allow-list, holds a
+                renewable lease, and falls back to shadow if Duvora or the controller goes away. SSH (22), ICMP, DHCP, established connections and the control plane stay reachable.
               </p>
             )}
           </>
@@ -242,7 +242,7 @@ function PlanForm({
           </>
         )}
         {action === 'release' && (
-          <p className="dv-fine">{netra ? 'Removes the Netra node isolation from the selected devices.' : 'Removes every simulated isolation policy from the selected devices.'}</p>
+          <p className="dv-fine">{netra ? 'Removes node isolation from the selected devices.' : 'Removes every simulated isolation policy from the selected devices.'}</p>
         )}
       </div>
       {plan && (
@@ -270,12 +270,12 @@ function PlanForm({
               ))}
             </Table>
           )}
-          {plan.shadow && <p className="dv-fine">Replayed from the last {Math.round(Object.values(plan.shadow)[0].window / 60)} minutes of Netra flow records.</p>}
+          {plan.shadow && <p className="dv-fine">Replayed from the last {Math.round(Object.values(plan.shadow)[0].window / 60)} minutes of observed flow records.</p>}
           <p className="dv-fine">Expires {when(plan.expires)}</p>
           {plan.blockers.length ? (
             <p className="login-error">{plan.blockers.join(' · ')}</p>
           ) : plan.netra ? (
-            <p className="dv-fine">Netra will change the kernel isolation on the node. Confirm with: {plan.confirmation}</p>
+            <p className="dv-fine">The kernel isolation on the node will change. Confirm with: {plan.confirmation}</p>
           ) : (
             <p className="dv-fine">Only the local simulation model will change.</p>
           )}
@@ -295,7 +295,7 @@ function PlanForm({
       <div className="dv-dialog-actions">
         {plan && !plan.blockers.length ? (
           <button type="button" className="primary" onClick={apply} disabled={busy || (plan.confirmation.startsWith('ENFORCE') && typed !== plan.confirmation)}>
-            {plan.netra ? (plan.mode === 'netra-enforce' ? 'Enforce on Netra' : plan.mode === 'netra-release' ? 'Release on Netra' : 'Apply shadow on Netra') : 'Apply simulation'}
+            {plan.netra ? (plan.mode.endsWith('-enforce') ? 'Enforce in kernel' : plan.mode.endsWith('-release') ? 'Release isolation' : 'Apply shadow') : 'Apply simulation'}
           </button>
         ) : (
           <button type="submit" className="primary" disabled={busy}>

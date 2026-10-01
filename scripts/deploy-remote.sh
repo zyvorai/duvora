@@ -20,7 +20,10 @@
 #   DUVORA_DEMO             1 (default) seeds the fleet simulator with demo devices
 #   DUVORA_NETRA            auto (default): connect to Netra when the host runs it in the same
 #                           cluster (netra-system/netra + ~/.netra/api-key); off disables
-#   DUVORA_NETRA_ENFORCE    1 allows promoting Netra shadow isolation to enforcement (default 0)
+#   DUVORA_NETRA_ENFORCE    1 allows promoting shadow isolation to enforcement (default 0)
+#   DUVORA_EBPF_ENFORCE     same as DUVORA_NETRA_ENFORCE
+#   DUVORA_AGENT            1 builds the native eBPF agent image and runs it as a DaemonSet,
+#                           with a host-bound key per node kept in ~/.duvora/agent-keys.json (default 0)
 #   DUVORA_REMOTE_SUBDIR    remote checkout relative to $HOME (default .deployments/duvora)
 #   DUVORA_DEPLOY_MAX_DISK_PCT   refuse above this root-disk usage (default 95)
 #   DUVORA_DEPLOY_READY_TIMEOUT  seconds to wait for the rollout (default 600)
@@ -39,12 +42,13 @@ VERIFY_ONLY=false
 TARGET=""
 POSITIONAL=()
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30)
-VERSION="0.3.0"
+VERSION="0.4.0"
 IMAGE="ghcr.io/zyvorai/duvora:${VERSION}"
+AGENT_IMAGE="ghcr.io/zyvorai/duvora-agent:${VERSION}"
 PORT=30880
 
 usage() {
-  sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
   exit 0
 }
 
@@ -83,7 +87,8 @@ ADMIN_PASSWORD="${DUVORA_ADMIN_PASSWORD:-Admin@321}"
 KEYS="${DUVORA_KEYS:-}"
 DEMO="${DUVORA_DEMO:-1}"
 NETRA="${DUVORA_NETRA:-auto}"
-NETRA_ENFORCE="${DUVORA_NETRA_ENFORCE:-0}"
+NETRA_ENFORCE="${DUVORA_EBPF_ENFORCE:-${DUVORA_NETRA_ENFORCE:-0}}"
+AGENT="${DUVORA_AGENT:-0}"
 MAX_DISK="${DUVORA_DEPLOY_MAX_DISK_PCT:-95}"
 READY_TIMEOUT="${DUVORA_DEPLOY_READY_TIMEOUT:-600}"
 SUBDIR="${DUVORA_REMOTE_SUBDIR:-.deployments/duvora}"
@@ -123,6 +128,8 @@ KEYS=$(q "$KEYS")
 DEMO=$(q "$DEMO")
 NETRA=$(q "$NETRA")
 NETRA_ENFORCE=$(q "$NETRA_ENFORCE")
+AGENT=$(q "$AGENT")
+AGENT_IMAGE=$(q "$AGENT_IMAGE")
 log() { printf '[duvora-remote] %s\n' "\$*"; }
 
 used=\$(df -P / | awk 'NR==2 {gsub("%","",\$5); print \$5}')
@@ -196,6 +203,7 @@ wait_healthy() {
 }
 
 if [[ "\$PROFILE" == "docker" ]]; then
+  [[ "\$AGENT" == 1 ]] && log "note: DUVORA_AGENT=1 needs Kubernetes; on a plain host run duvora-agent --ebpf auto instead"
   build_image
   log "running the container with \$runtime"
   \$runtime rm -f duvora >/dev/null 2>&1 || true
@@ -238,21 +246,47 @@ else
 
   import_image() {
     if command -v k3s >/dev/null 2>&1; then
-      \$runtime save "\$IMAGE" | sudo k3s ctr images import -
+      \$runtime save "\${1:-\$IMAGE}" | sudo k3s ctr images import -
     fi
   }
   ensure_image() {
     # kubelet image GC can drop an imported image before the pod starts.
-    if command -v k3s >/dev/null 2>&1 && [[ -n "\$runtime" ]] && ! sudo k3s ctr images ls -q | grep -qx "docker.io/\$IMAGE\\|\$IMAGE"; then
-      log "image missing from containerd; re-importing"
-      import_image
+    local image="\${1:-\$IMAGE}"
+    if command -v k3s >/dev/null 2>&1 && [[ -n "\$runtime" ]] && ! sudo k3s ctr images ls -q | grep -qx "docker.io/\$image\\|\$image"; then
+      log "\$image missing from containerd; re-importing"
+      import_image "\$image"
     fi
   }
   if [[ "\$PROFILE" != "quick" ]]; then
     build_image
     import_image
+    if [[ "\$AGENT" == 1 ]]; then
+      log "building the native eBPF agent image"
+      \$runtime build -f Dockerfile.agent -t "\$AGENT_IMAGE" .
+      import_image "\$AGENT_IMAGE"
+    fi
   fi
   ensure_image
+  [[ "\$AGENT" == 1 ]] && ensure_image "\$AGENT_IMAGE"
+
+  # One host-bound agent key per node, kept across deploys.
+  AGENT_KEYS=""
+  if [[ "\$AGENT" == 1 ]]; then
+    NODES="\$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}')"
+    AGENT_KEYS="\$(N="\$NODES" F="\$HOME/.duvora/agent-keys.json" python3 -c 'import json, os, secrets
+path = os.environ["F"]
+try:
+    keys = json.load(open(path))
+except (OSError, ValueError):
+    keys = {}
+for node in os.environ["N"].split():
+    keys.setdefault(node, secrets.token_urlsafe(32))
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(keys, f)
+print(json.dumps(keys))')"
+    log "native eBPF agent on: \$NODES"
+  fi
 
   # Netra in the same cluster: reach it by service name and pin its serving certificate.
   NETRA_URL="" NETRA_KEY="" NETRA_CA=""
@@ -277,10 +311,17 @@ else
 
   # --set splits on commas, so the password and JSON keys go through a private values file (JSON is YAML).
   VALUES="\$(mktemp)"; chmod 600 "\$VALUES"; trap 'rm -f "\$VALUES"' EXIT
-  P="\$ADMIN_PASSWORD" K="\$KEYS" D="\$DEMO" NU="\$NETRA_URL" NK="\$NETRA_KEY" NC="\$NETRA_CA" NE="\$NETRA_ENFORCE" python3 -c 'import json, os
-v = {"auth": {"adminPassword": os.environ["P"], "keys": os.environ["K"]}, "demo": os.environ["D"] == "1"}
+  P="\$ADMIN_PASSWORD" K="\$KEYS" D="\$DEMO" NU="\$NETRA_URL" NK="\$NETRA_KEY" NC="\$NETRA_CA" NE="\$NETRA_ENFORCE" \
+  AK="\$AGENT_KEYS" AI="\$AGENT_IMAGE" AU="https://\$HOST_IP:\$PORT" python3 -c 'import json, os
+v = {"auth": {"adminPassword": os.environ["P"], "keys": os.environ["K"]}, "demo": os.environ["D"] == "1",
+     "ebpf": {"enforce": os.environ["NE"] == "1"}}
 if os.environ["NU"]:
     v["netra"] = {"url": os.environ["NU"], "apiKey": os.environ["NK"], "caCert": os.environ["NC"] + "\\n", "enforce": os.environ["NE"] == "1"}
+if os.environ["AK"]:
+    repo, tag = os.environ["AI"].rsplit(":", 1)
+    # The serving certificate names the host IP, so agents (host network) connect there.
+    v["agent"] = {"enabled": True, "keys": json.loads(os.environ["AK"]), "url": os.environ["AU"],
+                  "image": {"repository": repo, "tag": tag}}
 print(json.dumps(v))' > "\$VALUES"
   helm upgrade --install duvora ./helm/duvora \
     --namespace duvora --create-namespace \
@@ -302,6 +343,11 @@ print(json.dumps(v))' > "\$VALUES"
     kubectl -n duvora get pods -o wide >&2
     kubectl -n duvora describe pods >&2 || true
     exit 1
+  fi
+  if [[ "\$AGENT" == 1 ]]; then
+    ensure_image "\$AGENT_IMAGE"
+    kubectl -n duvora rollout restart daemonset/duvora-agent
+    kubectl -n duvora rollout status daemonset/duvora-agent --timeout=180s || kubectl -n duvora logs -l app.kubernetes.io/component=agent --tail=30 >&2
   fi
 fi
 

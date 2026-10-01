@@ -18,6 +18,16 @@ jobs:
       - run: make check
       - run: python -m pip install --no-deps .
       - run: duvoractl --help && duvora --help && duvora-agent --help
+  bpf:
+    # Kernel tests for the native eBPF objects: TCX needs Linux 6.6+, which ubuntu-24.04 runners have.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang llvm libbpf1 linux-libc-dev
+      - run: uname -r && ls -l /sys/kernel/btf/vmlinux
+      - run: make bpf
+      - run: sudo DUVORA_BPF_TESTS=1 python3 -m unittest tests.test_bpf_kernel -v
+      - run: python3 -m unittest tests.test_native_ebpf -v
   web:
     runs-on: ubuntu-latest
     steps:
@@ -40,6 +50,7 @@ jobs:
       - run: helm lint helm/duvora
       - run: helm lint helm/duvora --set tls.enabled=true --set tls.cert=x --set tls.key=y
       - run: helm template duvora helm/duvora > /dev/null
+      - run: helm template duvora helm/duvora --set agent.enabled=true --set-json 'agent.keys={"node-1":"0123456789abcdef0123456789"}' | grep -q 'kind: DaemonSet'
       - run: bash -n scripts/deploy-remote.sh scripts/deploy-container.sh
       - run: ./scripts/deploy-remote.sh ci@example --dry-run | tail -n +2 | bash -n
       - run: ./scripts/deploy-remote.sh ci@example --docker --dry-run | tail -n +2 | bash -n
@@ -99,3 +110,7 @@ jobs:
           for _ in $(seq 1 30); do curl -sf http://127.0.0.1:8787/healthz && break; sleep 1; done
           curl -sf http://127.0.0.1:8787/ | grep -q '<div id="root">'
           docker exec duvora python -m duvora.healthcheck
+      - name: Build the native eBPF agent image
+        run: |
+          docker build -f Dockerfile.agent -t duvora-agent:test .
+          docker run --rm --entrypoint python duvora-agent:test -c "from duvora.bpf.libbpf import Libbpf; from duvora.bpf import OBJ_DIR; print(Libbpf().version(), sorted(p.name for p in OBJ_DIR.glob('*.o')))"

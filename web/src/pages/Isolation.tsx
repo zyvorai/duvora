@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../api';
 import { Badge, Empty, Notice, Section, Table } from '../components/kit';
-import { bytes, remaining } from '../lib/format';
+import { bytes, policyModeLabel, providerLabel, remaining } from '../lib/format';
 import { useFleet, useResource } from '../store';
 import type { Device, EbpfOverview, KillSwitch } from '../types';
 
@@ -13,8 +13,9 @@ interface Verdict {
 function NodeIsolation() {
   const { snapshot, openPlanFor, isAdmin, toast, refresh } = useFleet();
   const { data, reload } = useResource<EbpfOverview>('ebpf', 5000);
-  if (!snapshot || !data?.netra.configured) return null;
+  if (!snapshot || !data || !(data.netra.configured || data.devices.some((d) => d.provider === 'native'))) return null;
   const { netra } = data;
+  const providers = new Set(data.devices.map((d) => d.provider || 'netra'));
   const kill = netra.kill_switch;
   const rows = snapshot.devices.filter((d): d is Device & { ebpf: NonNullable<Device['ebpf']> } => Boolean(d.ebpf) && d.source !== 'simulator');
 
@@ -33,12 +34,13 @@ function NodeIsolation() {
 
   return (
     <Section
-      eyebrow="NETRA eBPF"
+      eyebrow="KERNEL eBPF"
       title="Node isolation"
       lede={
         <>
-          Allow-lists enforced in the kernel by Netra on the node behind each device. Run in shadow first; promote one device at a time. Enforcement {netra.enforce_allowed ? 'is enabled' : 'is disabled'} on
-          this server{netra.isolation_supported ? '' : '; this Netra build has no node isolation API'}.
+          Allow-lists enforced in the kernel on the node behind each device, by the native Duvora agent or by Netra. Run in shadow first; promote one device at a time. Enforcement{' '}
+          {netra.enforce_allowed ? 'is enabled' : 'is disabled'} on this server
+          {netra.configured && providers.has('netra') && !netra.isolation_supported ? '; this Netra build has no node isolation API' : ''}.
         </>
       }
       actions={
@@ -53,7 +55,7 @@ function NodeIsolation() {
         </Notice>
       )}
       {rows.length ? (
-        <Table heads={['Device / node', 'Allow-list', 'Stage', 'Kernel counters', 'Top blocked destinations', 'Lease', '']} label="Netra node isolation">
+        <Table heads={['Device / node', 'Allow-list', 'Stage', 'Kernel counters', 'Top blocked destinations', 'Lease', '']} label="Node isolation">
           {rows.map((d) => {
             const ni = d.netra_isolation;
             const st = d.ebpf.isolation;
@@ -63,8 +65,8 @@ function NodeIsolation() {
                 <td>
                   <strong>{d.id}</strong>
                   <small className="dv-sub">
-                    {d.ebpf.node}
-                    {d.ebpf.nodeiso_available ? '' : ' · netra_nodeiso not attached'}
+                    {d.ebpf.node} · {providerLabel(d.ebpf.provider)}
+                    {d.ebpf.nodeiso_available ? '' : ` · isolation not attached${d.ebpf.isolation?.unavailable ? ` (${d.ebpf.isolation.unavailable})` : ''}`}
                   </small>
                 </td>
                 <td className="dv-mono">{ni ? `${ni.policy.cidr} ${ni.policy.ports.length ? ni.policy.ports.join(',') : 'all ports'}` : '—'}</td>
@@ -111,7 +113,9 @@ function NodeIsolation() {
           })}
         </Table>
       ) : (
-        <Empty title="No Netra-backed devices.">Map devices to Netra nodes (DUVORA_NETRA_NODE_MAP) or enable discovery (DUVORA_NETRA_DISCOVER=1).</Empty>
+        <Empty title="No eBPF-backed devices.">
+          Run <code>duvora-agent --ebpf auto</code> on the host, or map devices to Netra nodes (DUVORA_NETRA_NODE_MAP / DUVORA_NETRA_DISCOVER=1).
+        </Empty>
       )}
     </Section>
   );
@@ -140,8 +144,8 @@ export default function Isolation() {
     <div className="grid">
       <div className="span3">
         <Notice>
-          Simulated policies are model-only: they do not enforce a firewall, VLAN, VRF, or tenant boundary. Multiple allow-lists combine as a union. Netra node isolation (below) is real kernel
-          enforcement on the node.
+          Simulated policies are model-only: they do not enforce a firewall, VLAN, VRF, or tenant boundary. Multiple allow-lists combine as a union. Node isolation (below) is real kernel
+          enforcement on the node, by the native agent or Netra.
         </Notice>
       </div>
       <Section
@@ -166,7 +170,7 @@ export default function Isolation() {
                 <td>{p.ports.length ? p.ports.join(', ') : 'All ports'}</td>
                 <td>{p.devices.join(', ')}</td>
                 <td>
-                  <Badge tone={p.mode === 'netra-enforce' ? 'warn' : 'info'}>{p.mode.startsWith('netra-') ? `Netra ${p.mode.slice(6)}` : 'Simulated allow-list'}</Badge>
+                  <Badge tone={p.mode.endsWith('-enforce') ? 'warn' : 'info'}>{policyModeLabel(p.mode)}</Badge>
                 </td>
               </tr>
             ))}

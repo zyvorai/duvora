@@ -36,7 +36,7 @@ export const navGroups: NavGroup[] = [
     label: 'Operate',
     children: [
       { page: 'services', label: 'Services', blurb: 'Digest-pinned service images and simulated reconciliation.' },
-      { page: 'isolation', label: 'Isolation', blurb: 'Allow-list plans, Netra shadow and enforce, kill switch, and release.' },
+      { page: 'isolation', label: 'Isolation', blurb: 'Allow-list plans, kernel shadow and enforce, kill switch, and release.' },
       { page: 'operations', label: 'Operations', blurb: 'Durable jobs, workflow steps, and eligible rollback.' },
     ],
   },

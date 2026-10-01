@@ -29,14 +29,18 @@ export interface IsolationDest {
   bytes?: number;
 }
 
-/** Netra's view of the node isolation (kernel counters, effective mode). */
+/** Where eBPF observations and node isolation come from: Duvora's own agent or a Netra controller. */
+export type EbpfProvider = 'native' | 'netra';
+
+/** The node's view of its isolation (kernel counters, effective mode), from the agent or Netra. */
 export interface NetraIsolationStatus {
   policy_id: string;
-  mode: 'shadow' | 'enforce' | string;
+  mode: 'shadow' | 'enforce' | 'off' | string;
   requested_mode?: string;
   revision?: number;
   applied_revision?: number;
-  lease_until?: string | null;
+  /** ISO time from Netra, epoch seconds from the native agent. */
+  lease_until?: string | number | null;
   demoted?: string;
   agent_stale?: boolean;
   unavailable?: string;
@@ -51,9 +55,10 @@ export interface NetraIsolationStatus {
   top: IsolationDest[];
 }
 
-/** What Duvora asked Netra for. */
+/** What Duvora asked the provider for. */
 export interface DuvoraIsolation {
   node: string;
+  provider?: EbpfProvider;
   policy_id: string;
   job: string;
   stage: 'shadow' | 'enforce';
@@ -73,6 +78,8 @@ export interface Talker {
 }
 
 export interface DeviceEbpf {
+  provider?: EbpfProvider;
+  errors?: string[];
   node: string;
   stale: boolean;
   age: number;
@@ -103,7 +110,7 @@ export interface Device {
   model: string;
   host: string;
   site: string;
-  source: 'simulator' | 'linux-pci' | 'nvidia-dpf' | 'netra-ebpf';
+  source: 'simulator' | 'linux-pci' | 'nvidia-dpf' | 'netra-ebpf' | 'duvora-ebpf';
   health: string;
   last_seen: number;
   version: number;
@@ -138,10 +145,15 @@ export interface EbpfOverview {
     nodes: number;
     kill_switch: KillSwitch;
   };
+  /** DUVORA_EBPF_SOURCE: which provider the server accepts. */
+  source?: 'native' | 'netra' | 'auto';
+  native?: { agents: number };
   devices: (Pick<DeviceEbpf, 'node' | 'stale' | 'kernel' | 'btf' | 'programs' | 'attached' | 'mode' | 'nodeiso_available' | 'drop_info_unavailable' | 'tcp_unavailable' | 'isolation' | 'updated'> & {
     id: string;
     host: string;
     source: string;
+    provider?: EbpfProvider;
+    errors?: string[];
     metrics_source?: string;
     netra_isolation?: DuvoraIsolation | null;
   })[];

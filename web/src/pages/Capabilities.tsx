@@ -1,5 +1,5 @@
 import { Badge, Empty, Section, Table } from '../components/kit';
-import { ago } from '../lib/format';
+import { ago, providerLabel } from '../lib/format';
 import { useFleet, useResource } from '../store';
 import type { EbpfOverview } from '../types';
 
@@ -7,9 +7,9 @@ const COPY: Record<string, string> = {
   simulator: 'Durable plans, jobs, policies, service records, upgrades, and rollback in the local model.',
   linux_discovery: 'Reads Linux sysfs PCI identity. No device writes or automatic readiness claims.',
   dpf_import: 'Imports Kubernetes DPF DPU objects using a read-only kubectl bridge.',
-  ebpf_telemetry: 'Kernel-measured rates, drop reasons, TCP health, and talkers from Netra. Read-only.',
+  ebpf_telemetry: 'Kernel-measured rates, drop reasons, TCP health, and talkers from the native Duvora agent (duvora-agent --ebpf) or Netra. Read-only.',
   hardware_enforcement:
-    'DPU hardware enforcement is unavailable. With Netra, node isolation runs in the kernel: shadow first, then a leased enforce with a kill switch.',
+    'DPU hardware enforcement is unavailable. Node isolation runs in the host kernel, through the native agent or Netra: shadow first, then a leased enforce with a kill switch.',
   firmware_flash: 'Requires vendor compatibility checks, signed artifacts, recovery validation, and a hardware adapter.',
   storage_offload: 'Requires a validated DOCA storage integration and supported hardware.',
 };
@@ -19,6 +19,10 @@ export default function Capabilities() {
   const { data } = useResource<EbpfOverview>('ebpf', 10000);
   if (!snapshot) return null;
   const netra = data?.netra;
+  const agents = data?.native?.agents ?? 0;
+  const netraText = netra?.configured
+    ? `Netra: ${netra.connected ? 'connected' : 'not connected'} to ${netra.url || 'Netra'} · ${netra.nodes} node(s) · last sync ${netra.last_sync ? ago(netra.last_sync) : 'never'}${netra.error ? ` · ${netra.error}` : ''}`
+    : 'Netra: not configured (optional).';
   return (
     <div className="grid">
       {Object.entries(snapshot.capabilities).map(([key, value]) => (
@@ -31,20 +35,21 @@ export default function Capabilities() {
       ))}
       <Section
         eyebrow="eBPF PROBE"
-        title="Netra kernel capabilities"
-        lede={
-          netra?.configured
-            ? `${netra.connected ? 'Connected' : 'Not connected'} to ${netra.url || 'Netra'} · ${netra.nodes} node(s) · last sync ${netra.last_sync ? ago(netra.last_sync) : 'never'}${netra.error ? ` · ${netra.error}` : ''}`
-            : 'Netra is not configured (set DUVORA_NETRA_URL and DUVORA_NETRA_API_KEY). Without it, eBPF telemetry and node isolation are unavailable.'
-        }
+        title="Kernel capabilities"
+        lede={`Source: ${data?.source ?? 'auto'} · native agents reporting: ${agents} · ${netraText}`}
       >
         {data?.devices.length ? (
-          <Table heads={['Device / node', 'Kernel', 'BTF', 'Programs attached', 'Drop reasons', 'TCP events', 'Node isolation']} label="eBPF capability probe">
+          <Table heads={['Device / node', 'Provider', 'Kernel', 'BTF', 'Programs attached', 'Drop reasons', 'TCP events', 'Node isolation']} label="eBPF capability probe">
             {data.devices.map((d) => (
               <tr key={d.id}>
                 <td>
                   <strong>{d.id}</strong>
                   <small className="dv-sub">{d.node}</small>
+                </td>
+                <td>
+                  <Badge tone={d.stale ? 'warn' : d.provider === 'native' ? 'ok' : 'info'}>{providerLabel(d.provider)}</Badge>
+                  {d.stale && <small className="dv-sub">stale</small>}
+                  {d.errors?.length ? <small className="dv-sub">{d.errors[0]}</small> : null}
                 </td>
                 <td className="dv-mono">{d.kernel || 'Unknown'}</td>
                 <td>
@@ -63,7 +68,10 @@ export default function Capabilities() {
             ))}
           </Table>
         ) : (
-          netra?.configured && <Empty title="No devices matched to Netra nodes.">Unmatched nodes: {netra.unmatched.join(', ') || 'none'}.</Empty>
+          <Empty title="No eBPF-backed devices yet.">
+            Run <code>duvora-agent --ebpf auto</code> on a host (or enable the Helm agent DaemonSet)
+            {netra?.configured ? `; unmatched Netra nodes: ${netra.unmatched.join(', ') || 'none'}` : ''}.
+          </Empty>
         )}
       </Section>
     </div>

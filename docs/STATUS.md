@@ -1,4 +1,4 @@
-# Capability matrix — 0.3.0
+# Capability matrix — 0.4.0
 
 | Capability | Implementation | Validation |
 |---|---|---|
@@ -21,13 +21,14 @@
 | Helm chart, k3s and container deploy scripts | Working | `helm lint`/template and script dry-runs; remote host run pending |
 | Hardware OS provisioning | Not implemented | Requires BlueField/DPF lab |
 | DPU service execution | Not implemented | Requires actual runtime adapter |
-| eBPF telemetry via Netra (rates, drop reasons, TCP retransmits/resets, top talkers, capability probe) | Working; read-only | Fake-Netra unit tests; live Netra on Linux 7.0 |
-| Shadow isolation (flow replay at preview, kernel would-block counters) | Working via Netra node isolation | Unit, browser and live tested; never drops |
-| Enforced node isolation (allow-only egress, leased, kill switch) | Working via Netra `netra_nodeiso` (TCX egress); node-scoped, not per-tenant | Netra BPF_PROG_TEST_RUN + veth tests; live tested with SSH and controller kept reachable |
+| Native eBPF agent (`duvora-agent --ebpf`: libbpf via ctypes, TCX counters and flows, drop reasons, TCP events) | Working; read-only sensors | Unit tests; kernel load tests (`make bpf-test`); live on Linux 7.0 beside Cilium |
+| eBPF telemetry via Netra (rates, drop reasons, TCP retransmits/resets, top talkers, capability probe) | Working, optional; read-only | Fake-Netra unit tests; live Netra on Linux 7.0 |
+| Shadow isolation (flow replay at preview, kernel would-block counters) | Working via the native `duvora_nodeiso` or Netra node isolation | Unit, browser and live tested; never drops |
+| Enforced node isolation (allow-only egress, leased, kill switch, agent fail-safe, local override) | Working via `duvora_nodeiso` (TCX egress) or Netra `netra_nodeiso`; node-scoped, not per-tenant | BPF_PROG_TEST_RUN verdicts and veth/netns traffic tests; live tested with SSH and controller kept reachable |
 | DPU hardware firewall/tenant isolation | Not implemented | Requires policy backend and traffic tests |
 | Firmware/BFB flashing | Not implemented | Requires compatibility/recovery qualification |
 | Vendor hardware counter collectors | Not implemented | Real metrics accepted only if provided by a qualified source |
 | NVMe-oF/DOCA SNAP/RDMA offload | Not implemented | Requires hardware/backend qualification |
 | SSO/OIDC, tenant RBAC, HA | Not implemented | Follow-up enterprise work |
 
-This project is a complete runnable evaluation repository, not a complete production DPU orchestration implementation. Provisioning, acceleration, and DPU hardware enforcement must not be advertised as delivered by 0.3.0. Netra node isolation is host-kernel enforcement on a Netra node, not DPU offload.
+This project is a complete runnable evaluation repository, not a complete production DPU orchestration implementation. Provisioning, acceleration, and DPU hardware enforcement must not be advertised as delivered by 0.4.0. Node isolation, native or through Netra, is host-kernel enforcement on the node, not DPU offload.

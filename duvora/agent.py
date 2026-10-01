@@ -1,4 +1,5 @@
-"""Read-only Linux PCI discovery; no privileged subprocesses or hardware writes."""
+"""Host agent: read-only Linux PCI discovery and, with --ebpf, Duvora's native eBPF sensors and node
+isolation (duvora/bpf). No privileged subprocesses or hardware writes."""
 import argparse
 import hashlib
 import json
@@ -22,7 +23,7 @@ def read(path, default="unknown"):
 
 
 def discover(root=Path("/sys/bus/pci/devices"), host=None, site="unassigned"):
-    host = host or re.sub(r"[^a-z0-9._-]", "-", socket.gethostname().lower())[:63]
+    host = host or host_slug(socket.gethostname())
     reports = []
     if not root.exists():
         return reports
@@ -37,27 +38,88 @@ def discover(root=Path("/sys/bus/pci/devices"), host=None, site="unassigned"):
     return reports
 
 
+def host_slug(name):
+    return re.sub(r"[^a-z0-9._-]", "-", (name or "").lower())[:63]
+
+
+def host_token(path, host):
+    """This host's token from a JSON file of host to token (the Helm DaemonSet's shared key map)."""
+    if not path:
+        return ""
+    try:
+        keys = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return ""
+    token = keys.get(host) if isinstance(keys, dict) else None
+    return token if isinstance(token, str) else ""
+
+
+def start_ebpf(args, token):
+    """Load the native sensors and node isolation. Returns an EbpfAgent, or None when unavailable in auto mode."""
+    try:
+        from .bpf.libbpf import Libbpf
+        from .bpf.nodeiso import NodeIsolation
+        from .bpf.runtime import EbpfAgent
+        from .bpf.sensors import Sensors, uplinks
+        from .bpf import OBJ_DIR
+        bpf = Libbpf()
+        interfaces = uplinks(args.interfaces)
+        sensors = Sensors(bpf, interfaces, args.ebpf)
+    except OSError as exc:
+        if args.ebpf == "required":
+            raise SystemExit(f"eBPF unavailable: {exc}")
+        print(json.dumps({"ebpf": "unavailable", "error": str(exc)}), flush=True)
+        return None
+    isolation, why = None, "disabled with --no-isolation" if args.no_isolation else ""
+    if not args.no_isolation:
+        try:
+            isolation = NodeIsolation(bpf, OBJ_DIR / "duvora_nodeiso.o", [socket.if_nametoindex(i) for i in interfaces])
+        except OSError as exc:
+            if args.ebpf == "required":
+                raise SystemExit(f"node isolation unavailable: {exc}")
+            why = str(exc)[:200]
+    call = lambda method, path, body: request(args.url, token, path, body, method=method)
+    print(json.dumps({"ebpf": "loaded", "interfaces": interfaces, "programs": sensors.attached,
+                      "unavailable": sensors.unavailable, "isolation": why or "attached"}), flush=True)
+    return EbpfAgent(args.host, args.url, call, sensors, isolation, why)
+
+
 def main():
-    p = argparse.ArgumentParser(description="Read-only BlueField PCI inventory agent")
-    p.add_argument("--host", default=re.sub(r"[^a-z0-9._-]", "-", socket.gethostname().lower())[:63])
+    p = argparse.ArgumentParser(description="Duvora host agent: read-only BlueField PCI inventory and native eBPF")
+    p.add_argument("--host", default=host_slug(os.environ.get("DUVORA_HOST") or socket.gethostname()))
     p.add_argument("--site", default="unassigned")
     p.add_argument("--url", default=os.environ.get("DUVORA_URL", "http://127.0.0.1:8787"))
     p.add_argument("--submit", action="store_true")
     p.add_argument("--interval", type=int, default=0, help="0 = once; otherwise repeat every N seconds")
+    p.add_argument("--ebpf", choices=("off", "auto", "required"), default=os.environ.get("DUVORA_EBPF", "off"),
+                   help="load native eBPF sensors and node isolation (Linux, root or CAP_BPF+CAP_NET_ADMIN+CAP_PERFMON)")
+    p.add_argument("--interfaces", default=os.environ.get("DUVORA_EBPF_INTERFACES", ""),
+                   help="comma-separated interfaces (default: those carrying a default route)")
+    p.add_argument("--no-isolation", action="store_true", default=os.environ.get("DUVORA_EBPF_ISOLATION") == "off")
     args = p.parse_args()
     if args.interval < 0 or (args.interval and args.interval < 10):
         p.error("Interval must be zero or at least 10 seconds")
-    token = os.environ.get("DUVORA_TOKEN", "")
-    if args.submit and not token:
+    token = os.environ.get("DUVORA_TOKEN", "") or host_token(os.environ.get("DUVORA_AGENT_KEYS_FILE"), args.host)
+    if (args.submit or args.ebpf != "off") and not token:
         p.error("Set DUVORA_TOKEN to a host-bound agent key")
+    if args.ebpf != "off" and not args.interval:
+        args.interval = 15
+    ebpf = start_ebpf(args, token) if args.ebpf != "off" else None
     while True:
         reports = discover(host=args.host, site=args.site)
         if args.submit:
             for report in reports:
-                request(args.url, token, "/api/v1/reports", report)
+                try:
+                    request(args.url, token, "/api/v1/reports", report)
+                except OSError as exc:
+                    print(json.dumps({"report": report["id"], "error": str(exc)}), flush=True)
             print(json.dumps({"submitted": len(reports), "host": args.host}), flush=True)
-        else:
+        elif args.ebpf == "off":
             print(json.dumps(reports, indent=2), flush=True)
+        if ebpf:
+            applied = ebpf.step()
+            print(json.dumps({"ebpf": "reported", "isolation": applied["mode"], "demoted": applied["demoted"],
+                              "errors": ebpf.errors[-3:]}), flush=True)
         if not args.interval:
             break
         time.sleep(args.interval)
@@ -65,3 +127,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

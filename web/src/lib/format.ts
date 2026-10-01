@@ -1,5 +1,14 @@
 export const sourceLabel = (s: string) =>
-  ({ simulator: 'Simulated', 'linux-pci': 'Linux PCI', 'nvidia-dpf': 'NVIDIA DPF', 'netra-ebpf': 'Netra eBPF' })[s] || s;
+  ({ simulator: 'Simulated', 'linux-pci': 'Linux PCI', 'nvidia-dpf': 'NVIDIA DPF', 'netra-ebpf': 'Netra eBPF', 'duvora-ebpf': 'Native eBPF' })[s] || s;
+
+/** eBPF provider: Duvora's own host agent or a Netra controller. */
+export const providerLabel = (p: string | undefined) => (p === 'native' ? 'Native agent' : 'Netra');
+
+/** Policy mode: "native-shadow", "netra-enforce", or "simulation". */
+export function policyModeLabel(mode: string): string {
+  const m = /^(native|netra)-(.+)$/.exec(mode);
+  return m ? `${providerLabel(m[1])} ${m[2]}` : 'Simulated allow-list';
+}
 
 export const when = (seconds: number | null | undefined) =>
   seconds ? new Date(seconds * 1000).toLocaleString() : '—';

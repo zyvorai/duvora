@@ -40,20 +40,20 @@ async function menu(page, group, item) {
   await shot(page, 'netra-telemetry');
 
   await menu(page, 'Operate', 'Isolation');
-  const table = page.getByRole('table', { name: 'Netra node isolation' });
+  const table = page.getByRole('table', { name: 'Node isolation' });
   const row = table.getByRole('row').filter({ hasText: DEVICE });
   await row.getByRole('button', { name: 'Shadow allow-list' }).click();
   await page.getByLabel('Allowed destination CIDR').fill('10.0.0.0/8');
   await page.getByLabel('Allowed ports (comma separated; empty = all)').fill('443');
   await page.getByRole('button', { name: 'Preview change' }).click();
   await page.getByRole('table', { name: 'Shadow replay' }).waitFor();
-  await page.getByRole('button', { name: 'Apply shadow on Netra' }).click();
+  await page.getByRole('button', { name: 'Apply shadow' }).click();
   await row.getByRole('button', { name: 'Promote to enforce' }).waitFor({ timeout: 20000 });
   await shot(page, 'netra-shadow');
 
   await row.getByRole('button', { name: 'Promote to enforce' }).click();
   await page.getByRole('button', { name: 'Preview change' }).click();
-  const enforce = page.getByRole('button', { name: 'Enforce on Netra' });
+  const enforce = page.getByRole('button', { name: 'Enforce in kernel' });
   assert.equal(await enforce.isDisabled(), true);
   await page.getByLabel(`Type ENFORCE ON ${DEVICE} to confirm`).fill(`ENFORCE ON ${DEVICE}`);
   await enforce.click();
@@ -69,7 +69,7 @@ async function menu(page, group, item) {
 
   await row.getByRole('button', { name: 'Release' }).click();
   await page.getByRole('button', { name: 'Preview change' }).click();
-  await page.getByRole('button', { name: 'Release on Netra' }).click();
+  await page.getByRole('button', { name: 'Release isolation' }).click();
   await row.getByRole('button', { name: 'Shadow allow-list' }).waitFor({ timeout: 20000 });
 
   await menu(page, 'Govern', 'Capabilities');

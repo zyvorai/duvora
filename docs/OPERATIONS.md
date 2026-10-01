@@ -63,7 +63,45 @@ The script syncs the repository to `~/.deployments/duvora`, installs k3s and Hel
 
 Set `DUVORA_ADMIN_PASSWORD` (default `Admin@321`), `DUVORA_KEYS`, or `DUVORA_DEMO=0` before running. The deploy refuses to run above `DUVORA_DEPLOY_MAX_DISK_PCT` (95%) root-disk usage and re-imports the image if kubelet's image garbage collection removed it.
 
-## Netra eBPF
+## Native eBPF agent
+
+`duvora-agent --ebpf auto` on a Linux host (6.6 or later, BTF, libbpf 1.3 or later, root or `CAP_BPF` + `CAP_NET_ADMIN` + `CAP_PERFMON`) loads Duvora's eBPF programs on the uplinks and reports to `POST /api/v1/agent/ebpf` with a host-bound agent key. The device appears as `ebpf-<host>` unless a device for that host already exists. Details: [EBPF.md](EBPF.md).
+
+Server settings:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DUVORA_EBPF_SOURCE` | `auto` | `native`, `netra`, or `auto` (a fresh native report wins) |
+| `DUVORA_EBPF_ENFORCE` | off | `1` allows promoting shadow isolation to enforce (`DUVORA_NETRA_ENFORCE=1` does the same) |
+| `DUVORA_NETRA_LEASE` | 900 | Enforce lease in seconds (60–3600), for both providers |
+| `DUVORA_AGENT_KEYS` | — | JSON object of host to token; each becomes an `agent:<host>` key (added to `DUVORA_KEYS`) |
+| `DUVORA_CONTROLLER_ADDRESSES` | — | Comma-separated addresses every agent always allows under isolation |
+
+Agent settings: `DUVORA_TOKEN` (or `DUVORA_AGENT_KEYS_FILE`, the same JSON, from which the agent takes its own host's token), `DUVORA_EBPF` (`off`, `auto`, `required`), `DUVORA_EBPF_INTERFACES`, `DUVORA_EBPF_ISOLATION=off`, `DUVORA_EBPF_FAILSAFE` (60 s), `DUVORA_EBPF_OVERRIDE` (`/run/duvora/isolation-off`), `DUVORA_CA_FILE`.
+
+To stop isolation on a host without the control plane, create the override file: `sudo mkdir -p /run/duvora && sudo touch /run/duvora/isolation-off`. The agent turns isolation off at its next interval (15 s by default). Remove the file to resume.
+
+With Helm, enable the agent DaemonSet:
+
+```bash
+helm upgrade --install duvora ./helm/duvora -n duvora \
+  --set agent.enabled=true --set ebpf.enforce=true \
+  --set-json 'agent.keys={"node-1":"<random 32+ chars>","node-2":"<random 32+ chars>"}'
+```
+
+The DaemonSet runs `duvora-agent --ebpf auto` with `hostNetwork`, the capabilities `BPF`, `NET_ADMIN`, `PERFMON` and `SYS_RESOURCE`, and mounts `/sys/fs/bpf`, `/sys/kernel/btf`, `/sys/kernel/tracing` and `/run/duvora` from the host. Each pod reports as its node name and uses that node's key from `agent.keys`. `deploy-remote.sh` builds the agent image and enables it with `DUVORA_AGENT=1`, generating a key for the host:
+
+```bash
+DUVORA_AGENT=1 DUVORA_EBPF_ENFORCE=1 ./scripts/deploy-remote.sh user@10.0.1.5
+```
+
+The TCX programs attach at the head of each uplink's chain, ahead of Cilium's `cil_from_netdev`/`cil_to_netdev`, which end the chain. Check with `sudo bpftool net show dev <uplink>`: `duvora_iface_ingress`, `duvora_iface_egress` and `duvora_nodeiso_egress` should be listed before the Cilium programs.
+
+If Netra also runs on the node, turn its node isolation off so only one egress filter is active: set `agent.nodeIsolation=off` in Netra's Helm values (or `kubectl -n netra-system set env ds/netra-agent NETRA_NODE_ISOLATION=off`, which the next Netra `helm upgrade` reverts). Netra telemetry can stay on; with `DUVORA_EBPF_SOURCE=auto` a fresh native report wins for that host.
+
+Before the first enforce on a remote host, arm a fallback that does not depend on the control plane, for example `sudo systemd-run --on-active=420 /bin/sh -c 'mkdir -p /run/duvora && touch /run/duvora/isolation-off'`, and stop the timer (`sudo systemctl stop <unit>.timer`) once you are done. SSH (local port 22), established TCP, ICMP, DHCP and the controller addresses are always allowed.
+
+## Netra eBPF (optional)
 
 Set `DUVORA_NETRA_URL` (HTTPS unless loopback) and `DUVORA_NETRA_API_KEY` to connect a [Netra](https://github.com/zyvorai/netra) controller; `DUVORA_NETRA_CA_FILE` pins a self-signed certificate. Devices map to Netra nodes by `DUVORA_NETRA_NODE_MAP` (JSON of device id or host to node), by host name, or, with `DUVORA_NETRA_DISCOVER=1`, as new `netra-<node>` devices. `DUVORA_NETRA_INTERVAL` (default 15 s) sets the polling period.
 

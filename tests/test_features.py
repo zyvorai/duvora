@@ -93,7 +93,7 @@ class StoreFeatureTests(unittest.TestCase):
         self.assertIsNone(self.store.token_user(created['token']))
 
     def test_history_records_and_downsamples(self):
-        now = time.time()
+        now = time.time() // 300 * 300 + 1
         self.store.simulate_metrics(now)
         self.store.simulate_metrics(now + 11)
         hist = self.store.history('bf3-01', '1h')

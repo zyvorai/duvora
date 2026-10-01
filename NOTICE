@@ -1,0 +1,16 @@
+Duvora
+Copyright 2026 Zyvor AI Labs.
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The console reuses material from Zyvor Netra, another Zyvor AI Labs product:
+  - web/src/styles.css
+  - web/src/styles/apple-story.css
+  - web/public/zyvor-mark.svg and web/public/zyvor-logomark.svg (Zyvor marks)
+Netra itself is distributed under the Zyvor Production License v1.0. Zyvor AI Labs,
+the copyright holder, licenses the copies of these files in this repository under
+the Apache License, Version 2.0. The Zyvor name and marks remain trademarks of
+Zyvor AI Labs; the license does not grant trademark rights.
+
+NVIDIA, BlueField, DOCA, Ubuntu, and Canonical are trademarks of their respective
+owners. Vendor software is not bundled.

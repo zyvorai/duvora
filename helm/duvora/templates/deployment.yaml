@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "duvora.name" . }}
+  labels:
+    {{- include "duvora.labels" . | nindent 4 }}
+spec:
+  # SQLite has a single writer: never run two pods against the same volume.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "duvora.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "duvora.labels" . | nindent 8 }}
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: control-plane
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: DUVORA_DB
+              value: /data/dpu.db
+            - name: DUVORA_PORT
+              value: "8787"
+            - name: DUVORA_DEMO
+              value: {{ ternary "1" "0" .Values.demo | quote }}
+            - name: DUVORA_AUDIT_RETENTION_DAYS
+              value: {{ .Values.auditRetentionDays | quote }}
+            - name: DUVORA_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "duvora.secretName" . }}
+                  key: admin-password
+            - name: DUVORA_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "duvora.secretName" . }}
+                  key: keys.json
+                  optional: true
+            {{- if .Values.tls.enabled }}
+            - name: DUVORA_TLS_CERT
+              value: /tls/tls.crt
+            - name: DUVORA_TLS_KEY
+              value: /tls/tls.key
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8787
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              scheme: {{ ternary "HTTPS" "HTTP" .Values.tls.enabled }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              scheme: {{ ternary "HTTPS" "HTTP" .Values.tls.enabled }}
+            initialDelaySeconds: 10
+          volumeMounts:
+            - name: state
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.tls.enabled }}
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-state
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ include "duvora.tlsSecretName" . }}
+        {{- end }}

@@ -1,0 +1,44 @@
+image:
+  repository: ghcr.io/zyvorai/duvora
+  tag: "0.2.0"
+  pullPolicy: IfNotPresent
+
+auth:
+  # Initial password for the `admin` user (only applied when the database is first created).
+  adminPassword: "Admin@321"
+  # Optional JSON object of access keys and host-bound agent keys (see docs/OPERATIONS.md).
+  keys: ""
+  # Use an existing Secret instead (keys: admin-password, keys.json).
+  existingSecret: ""
+
+# Seed the fleet simulator with demo devices.
+demo: true
+
+tls:
+  enabled: false
+  # PEM contents; or set existingSecret to a kubernetes.io/tls Secret.
+  cert: ""
+  key: ""
+  existingSecret: ""
+
+auditRetentionDays: 90
+
+service:
+  type: NodePort
+  port: 8787
+  nodePort: 30880
+
+persistence:
+  size: 2Gi
+  storageClass: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []

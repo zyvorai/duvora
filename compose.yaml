@@ -1,0 +1,23 @@
+services:
+  control-plane:
+    build: .
+    image: ghcr.io/zyvorai/duvora:0.2.0
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      # Initial admin password (first start only); change it under Govern → Users.
+      DUVORA_ADMIN_PASSWORD: ${DUVORA_ADMIN_PASSWORD:-Admin@321}
+      DUVORA_KEYS: ${DUVORA_KEYS:-}
+      DUVORA_DEMO: ${DUVORA_DEMO:-1}
+    volumes:
+      - state:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+volumes:
+  state:

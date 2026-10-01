@@ -1,0 +1,84 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: make check
+      - run: python -m pip install --no-deps .
+      - run: duvoractl --help && duvora --help && duvora-agent --help
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci --no-audit --no-fund
+      - run: npm --prefix web run typecheck
+      - run: npm --prefix web test
+      - run: npm --prefix web run build
+      - run: test -f duvora/static/index.html
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: helm lint helm/duvora
+      - run: helm lint helm/duvora --set tls.enabled=true --set tls.cert=x --set tls.key=y
+      - run: helm template duvora helm/duvora > /dev/null
+      - run: bash -n scripts/deploy-remote.sh scripts/deploy-container.sh
+      - run: ./scripts/deploy-remote.sh ci@example --dry-run | tail -n +2 | bash -n
+      - run: ./scripts/deploy-remote.sh ci@example --docker --dry-run | tail -n +2 | bash -n
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm --prefix web ci --no-audit --no-fund && npm --prefix web run build
+      - run: npm install --no-save playwright@1.63.0
+      - run: npx playwright install --with-deps chromium
+      - name: Exercise console workflows
+        env:
+          DUVORA_USER: admin
+          DUVORA_PASSWORD: Admin@321
+        run: |
+          python -m duvora.server --demo --db /tmp/browser.db > /tmp/server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          python -c "import urllib.request,time; [time.sleep(.2) for _ in range(10)]; urllib.request.urlopen('http://127.0.0.1:8787/healthz')"
+          node tests/e2e.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: console-screenshots
+          path: test-results/
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t duvora:test .
+      - name: Smoke-test the image
+        run: |
+          docker run -d --name duvora -p 127.0.0.1:8787:8787 -e DUVORA_ADMIN_PASSWORD=ci-password-123 -e DUVORA_DEMO=1 -v duvora-state:/data --read-only --tmpfs /tmp duvora:test
+          for _ in $(seq 1 30); do curl -sf http://127.0.0.1:8787/healthz && break; sleep 1; done
+          curl -sf http://127.0.0.1:8787/ | grep -q '<div id="root">'
+          docker exec duvora python -m duvora.healthcheck

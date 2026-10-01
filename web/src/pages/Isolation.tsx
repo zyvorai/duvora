@@ -1,11 +1,120 @@
 import { useState } from 'react';
 import { api } from '../api';
 import { Badge, Empty, Notice, Section, Table } from '../components/kit';
-import { useFleet } from '../store';
+import { bytes, remaining } from '../lib/format';
+import { useFleet, useResource } from '../store';
+import type { Device, EbpfOverview, KillSwitch } from '../types';
 
 interface Verdict {
   verdict: 'allow' | 'deny';
   matched: string[];
+}
+
+function NodeIsolation() {
+  const { snapshot, openPlanFor, isAdmin, toast, refresh } = useFleet();
+  const { data, reload } = useResource<EbpfOverview>('ebpf', 5000);
+  if (!snapshot || !data?.netra.configured) return null;
+  const { netra } = data;
+  const kill = netra.kill_switch;
+  const rows = snapshot.devices.filter((d): d is Device & { ebpf: NonNullable<Device['ebpf']> } => Boolean(d.ebpf) && d.source !== 'simulator');
+
+  async function toggleKill() {
+    const engage = !kill.engaged;
+    if (engage && !window.confirm('Engage the kill switch? Every enforced node goes back to shadow now, and enforcement is refused until released.')) return;
+    try {
+      const out = await api<KillSwitch & { demoted: string[]; errors: Record<string, string> }>('ebpf/kill-switch', 'POST', { engaged: engage });
+      const errs = Object.keys(out.errors || {});
+      toast(engage ? `Kill switch engaged; ${out.demoted.length} device(s) back in shadow${errs.length ? `; failed: ${errs.join(', ')}` : ''}` : 'Kill switch released');
+      await Promise.all([reload(), refresh()]);
+    } catch (err) {
+      toast((err as Error).message);
+    }
+  }
+
+  return (
+    <Section
+      eyebrow="NETRA eBPF"
+      title="Node isolation"
+      lede={
+        <>
+          Allow-lists enforced in the kernel by Netra on the node behind each device. Run in shadow first; promote one device at a time. Enforcement {netra.enforce_allowed ? 'is enabled' : 'is disabled'} on
+          this server{netra.isolation_supported ? '' : '; this Netra build has no node isolation API'}.
+        </>
+      }
+      actions={
+        <button type="button" className={kill.engaged ? 'primary' : 'danger'} disabled={!isAdmin} onClick={toggleKill} aria-pressed={kill.engaged}>
+          {kill.engaged ? 'Release kill switch' : 'Kill switch'}
+        </button>
+      }
+    >
+      {kill.engaged && (
+        <Notice tone="warn">
+          Kill switch engaged{kill.by ? ` by ${kill.by}` : ''}. Every node runs in shadow; enforce plans are refused.
+        </Notice>
+      )}
+      {rows.length ? (
+        <Table heads={['Device / node', 'Allow-list', 'Stage', 'Kernel counters', 'Top blocked destinations', 'Lease', '']} label="Netra node isolation">
+          {rows.map((d) => {
+            const ni = d.netra_isolation;
+            const st = d.ebpf.isolation;
+            const tone = st?.mode === 'enforce' ? 'warn' : st ? 'info' : 'idle';
+            return (
+              <tr key={d.id}>
+                <td>
+                  <strong>{d.id}</strong>
+                  <small className="dv-sub">
+                    {d.ebpf.node}
+                    {d.ebpf.nodeiso_available ? '' : ' · netra_nodeiso not attached'}
+                  </small>
+                </td>
+                <td className="dv-mono">{ni ? `${ni.policy.cidr} ${ni.policy.ports.length ? ni.policy.ports.join(',') : 'all ports'}` : '—'}</td>
+                <td>
+                  <Badge tone={tone}>{ni && ni.stage !== st?.mode ? `${ni.stage} (applying)` : st ? st.mode : 'none'}</Badge>
+                  {st?.demoted && <small className="dv-sub">Demoted: {st.demoted}</small>}
+                  {st?.agent_stale && <small className="dv-sub">Agent stale</small>}
+                </td>
+                <td>
+                  {st ? (
+                    <>
+                      {st.mode === 'enforce' ? `${st.blocked_packets} blocked (${bytes(st.blocked_bytes)})` : `${st.would_block_packets} would block (${bytes(st.would_block_bytes)})`}
+                      <small className="dv-sub">{st.allowed_packets} allowed</small>
+                    </>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td className="dv-mono">{st?.top.map((t) => `${t.address || t.peer}:${t.port}`).join(', ') || '—'}</td>
+                <td>{ni?.stage === 'enforce' ? remaining(ni.lease_until) : '—'}</td>
+                <td className="dv-actions">
+                  {ni?.stage === 'shadow' && (
+                    <button type="button" disabled={!isAdmin || kill.engaged || !netra.enforce_allowed} onClick={() => openPlanFor('isolate', [d.id], { stage: 'enforce', policy: ni.policy })}>
+                      Promote to enforce
+                    </button>
+                  )}
+                  {ni?.stage === 'enforce' && (
+                    <button type="button" disabled={!isAdmin} onClick={() => openPlanFor('isolate', [d.id], { stage: 'shadow', policy: ni.policy })}>
+                      Back to shadow
+                    </button>
+                  )}
+                  {ni ? (
+                    <button type="button" disabled={!isAdmin} onClick={() => openPlanFor('release', [d.id])}>
+                      Release
+                    </button>
+                  ) : (
+                    <button type="button" disabled={!isAdmin || !d.ebpf.nodeiso_available} onClick={() => openPlanFor('isolate', [d.id], { stage: 'shadow' })}>
+                      Shadow allow-list
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </Table>
+      ) : (
+        <Empty title="No Netra-backed devices.">Map devices to Netra nodes (DUVORA_NETRA_NODE_MAP) or enable discovery (DUVORA_NETRA_DISCOVER=1).</Empty>
+      )}
+    </Section>
+  );
 }
 
 export default function Isolation() {
@@ -31,7 +140,8 @@ export default function Isolation() {
     <div className="grid">
       <div className="span3">
         <Notice>
-          These policies are model-only. They do not enforce a firewall, VLAN, VRF, or tenant boundary on real hardware. Multiple allow-lists combine as a union.
+          Simulated policies are model-only: they do not enforce a firewall, VLAN, VRF, or tenant boundary. Multiple allow-lists combine as a union. Netra node isolation (below) is real kernel
+          enforcement on the node.
         </Notice>
       </div>
       <Section
@@ -56,7 +166,7 @@ export default function Isolation() {
                 <td>{p.ports.length ? p.ports.join(', ') : 'All ports'}</td>
                 <td>{p.devices.join(', ')}</td>
                 <td>
-                  <Badge tone="info">Simulated allow-list</Badge>
+                  <Badge tone={p.mode === 'netra-enforce' ? 'warn' : 'info'}>{p.mode.startsWith('netra-') ? `Netra ${p.mode.slice(6)}` : 'Simulated allow-list'}</Badge>
                 </td>
               </tr>
             ))}
@@ -65,6 +175,7 @@ export default function Isolation() {
           <Empty title="No isolation policies yet.">Select fleet devices and create a reviewed allow-list.</Empty>
         )}
       </Section>
+      <NodeIsolation />
       <Section eyebrow="MODEL" title="Test a destination" lede="Evaluate the model without sending a packet.">
         <form className="toolbar" onSubmit={evaluate}>
           <label>

@@ -17,6 +17,11 @@ DEFAULT_RULES = [
     {"id": "health-degraded", "name": "Device health degraded", "kind": "health", "severity": "warning", "enabled": True},
     {"id": "device-stale", "name": "Observation is stale", "kind": "stale", "threshold": 120, "severity": "critical", "enabled": True},
     {"id": "job-failed", "name": "Operation failed", "kind": "job", "severity": "critical", "enabled": True},
+    {"id": "tcp-retransmits", "name": "TCP retransmits per minute above threshold", "kind": "metric", "metric": "tcp_retransmits_pm", "threshold": 100, "severity": "warning", "enabled": True},
+    {"id": "tcp-resets", "name": "TCP resets per minute above threshold", "kind": "metric", "metric": "tcp_resets_pm", "threshold": 50, "severity": "warning", "enabled": True},
+    {"id": "ebpf-detached", "name": "eBPF sensor detached or stale", "kind": "ebpf", "severity": "warning", "enabled": True},
+    {"id": "isolation-would-block", "name": "Shadow isolation would block traffic", "kind": "isolation", "severity": "info", "enabled": True},
+    {"id": "isolation-blocked", "name": "Enforced isolation is dropping traffic", "kind": "isolation-enforce", "severity": "warning", "enabled": True},
 ]
 ALERT_INTERVAL = 5
 RESOLVED_RETENTION = 30 * 86400
@@ -76,6 +81,27 @@ class AlertsMixin:
                     value = d["metrics"].get(rule["metric"])
                     if value is not None and value > rule["threshold"]:
                         hit = f"{rule['metric']} = {value} (threshold {rule['threshold']})"
+                        reasons = d.get("ebpf", {}).get("drop_reasons") if rule["metric"] == "drops" else None
+                        if reasons:
+                            hit += f"; top kernel reason {reasons[0]['reason']} ({reasons[0]['count']})"
+                elif rule["kind"] == "ebpf" and d.get("ebpf"):
+                    e = d["ebpf"]
+                    if e.get("stale"):
+                        hit = f"Netra agent on {e['node']} is stale ({e.get('age', 0)} s)"
+                    elif e.get("program_count") and not e.get("attached"):
+                        hit = f"No eBPF programs attached on {e['node']}"
+                elif rule["kind"] == "isolation" and (d.get("ebpf", {}).get("isolation") or {}).get("mode") == "shadow":
+                    iso = d["ebpf"]["isolation"]
+                    if iso.get("would_block_delta"):
+                        top = iso.get("top") or []
+                        hit = f"{iso['would_block_delta']} packets would have been blocked in the last interval" + (
+                            f"; top {top[0].get('address') or top[0].get('destination') or top[0].get('peer')}:{top[0].get('port')}" if top else "")
+                elif rule["kind"] == "isolation-enforce" and (d.get("ebpf", {}).get("isolation") or {}).get("mode") == "enforce":
+                    iso = d["ebpf"]["isolation"]
+                    if iso.get("blocked_delta"):
+                        top = iso.get("top") or []
+                        hit = f"{iso['blocked_delta']} packets dropped by enforced isolation in the last interval" + (
+                            f"; top {top[0].get('address') or top[0].get('destination')}:{top[0].get('port')}" if top else "")
                 elif rule["kind"] == "health" and d["health"] == "degraded":
                     hit = "Source reports degraded health"
                 elif rule["kind"] == "stale" and d["source"] != "simulator" and now - d["last_seen"] > rule["threshold"]:

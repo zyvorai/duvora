@@ -72,13 +72,25 @@ class ReportsMixin:
                 steps.append(f"Inspect {inc['target']} in DPU fleet and review its source readiness.")
             elif inc["rule"] == "packet-drops":
                 steps.append(f"Review drop counters on {inc['target']} in Telemetry.")
+            elif inc["rule"] in ("tcp-retransmits", "tcp-resets"):
+                steps.append(f"Check path loss and peer health for {inc['target']} (Netra TCP events).")
+            elif inc["rule"] == "ebpf-detached":
+                steps.append(f"Check the Netra agent and program attachment on {inc['target']}.")
+            elif inc["rule"] == "isolation-would-block":
+                steps.append(f"Review would-block destinations on {inc['target']} before enforcing isolation.")
+            elif inc["rule"] == "isolation-blocked":
+                steps.append(f"Check the destinations enforced isolation drops on {inc['target']}; engage the kill switch if they are needed.")
             else:
                 steps.append(f"Review incident {inc['id']}: {inc['title']}.")
         if not steps:
             steps.append("No active incidents. Continue routine review.")
         body = {"generated": time.time(), "version": __version__, "demo": snap["demo"], "scorecard": card,
                 "fleet": {"total": len(snap["devices"]), "by_health": by("health"), "by_source": by("source"), "by_site": by("site")},
-                "incidents": incidents, "jobs": jobs[:50], "playbook": list(dict.fromkeys(steps))}
+                "incidents": incidents, "jobs": jobs[:50], "playbook": list(dict.fromkeys(steps)),
+                "ebpf": [{"device": d["id"], "node": d["ebpf"].get("node"),
+                          "drop_reasons": (d["ebpf"].get("drop_reasons") or [])[:3],
+                          "talkers": (d["ebpf"].get("talkers") or [])[:3]}
+                         for d in snap["devices"] if d.get("ebpf")]}
         body["markdown"] = markdown(body)
         return body
 
@@ -94,6 +106,12 @@ def markdown(r):
     lines += [f"- [{i['severity']}] {i['title']} — {i['detail']} ({i['state']})" for i in r["incidents"]] or ["- None"]
     lines += ["", "## Operations in the last 24 hours", ""]
     lines += [f"- {j['action']} on {', '.join(j['spec']['devices'])}: {j['state']}" for j in r["jobs"]] or ["- None"]
+    if r.get("ebpf"):
+        lines += ["", "## Kernel observations (Netra eBPF)", ""]
+        for e in r["ebpf"]:
+            reasons = ", ".join(f"{x['reason']} ({x['count']})" for x in e["drop_reasons"]) or "none"
+            talkers = ", ".join(f"{t['peer']}:{t['port']}/{t['protocol']}" for t in e["talkers"]) or "none"
+            lines.append(f"- {e['device']}: drop reasons {reasons}; top talkers {talkers}")
     lines += ["", "## Suggested next steps (review only)", ""]
     lines += [f"- {s}" for s in r["playbook"]]
     return "\n".join(lines) + "\n"

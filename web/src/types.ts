@@ -14,6 +14,82 @@ export interface Metrics {
   drops?: number;
   temperature_c?: number;
   link_gbps?: number;
+  pps?: number;
+  blocked_pps?: number;
+  tcp_retransmits_pm?: number;
+  tcp_resets_pm?: number;
+}
+
+export interface IsolationDest {
+  address?: string;
+  peer?: string;
+  protocol?: string;
+  port?: number;
+  packets?: number;
+  bytes?: number;
+}
+
+/** Netra's view of the node isolation (kernel counters, effective mode). */
+export interface NetraIsolationStatus {
+  policy_id: string;
+  mode: 'shadow' | 'enforce' | string;
+  requested_mode?: string;
+  revision?: number;
+  applied_revision?: number;
+  lease_until?: string | null;
+  demoted?: string;
+  agent_stale?: boolean;
+  unavailable?: string;
+  allowed_packets: number;
+  exempt_packets?: number;
+  would_block_packets: number;
+  would_block_bytes: number;
+  blocked_packets: number;
+  blocked_bytes: number;
+  would_block_delta?: number;
+  blocked_delta?: number;
+  top: IsolationDest[];
+}
+
+/** What Duvora asked Netra for. */
+export interface DuvoraIsolation {
+  node: string;
+  policy_id: string;
+  job: string;
+  stage: 'shadow' | 'enforce';
+  policy: { name: string; tenant: string; cidr: string; ports: number[] };
+  lease_until: number | null;
+  revision?: number;
+  updated: number;
+}
+
+export interface Talker {
+  peer: string;
+  port: number;
+  protocol: string;
+  packets: number;
+  bytes: number;
+  blocked?: number;
+}
+
+export interface DeviceEbpf {
+  node: string;
+  stale: boolean;
+  age: number;
+  kernel: string;
+  btf: boolean | null;
+  programs: string[];
+  program_count: number;
+  attached: number;
+  mode: string;
+  interfaces: string[];
+  drop_reasons: { reason: string; count: number }[];
+  drop_info_unavailable?: string | null;
+  tcp_unavailable?: string | null;
+  talkers: Talker[];
+  nodeiso_available: boolean;
+  isolation: NetraIsolationStatus | null;
+  updated: number;
 }
 
 export interface Service {
@@ -27,7 +103,7 @@ export interface Device {
   model: string;
   host: string;
   site: string;
-  source: 'simulator' | 'linux-pci' | 'nvidia-dpf';
+  source: 'simulator' | 'linux-pci' | 'nvidia-dpf' | 'netra-ebpf';
   health: string;
   last_seen: number;
   version: number;
@@ -38,6 +114,48 @@ export interface Device {
   metrics: Metrics;
   capabilities: string[];
   interfaces: string[];
+  metrics_source?: string;
+  ebpf?: DeviceEbpf;
+  netra_isolation?: DuvoraIsolation;
+}
+
+export interface KillSwitch {
+  engaged: boolean;
+  by?: string;
+  at?: number;
+}
+
+export interface EbpfOverview {
+  netra: {
+    configured: boolean;
+    connected: boolean;
+    url?: string;
+    last_sync: number | null;
+    error: string | null;
+    unmatched: string[];
+    isolation_supported: boolean;
+    enforce_allowed: boolean;
+    nodes: number;
+    kill_switch: KillSwitch;
+  };
+  devices: (Pick<DeviceEbpf, 'node' | 'stale' | 'kernel' | 'btf' | 'programs' | 'attached' | 'mode' | 'nodeiso_available' | 'drop_info_unavailable' | 'tcp_unavailable' | 'isolation' | 'updated'> & {
+    id: string;
+    host: string;
+    source: string;
+    metrics_source?: string;
+    netra_isolation?: DuvoraIsolation | null;
+  })[];
+}
+
+export interface ShadowReplay {
+  flows: number;
+  would_block_flows: number;
+  would_block_packets: number;
+  would_block_bytes: number;
+  unresolved: number;
+  top: { peer: string; port: number; packets: number; bytes: number }[];
+  source: string;
+  window: number;
 }
 
 export interface Policy {
@@ -60,6 +178,7 @@ export interface JobEvent {
 export interface Job {
   id: string;
   plan_id: string;
+  mode?: 'simulation' | 'netra';
   state: string;
   step: number;
   action: string;
@@ -91,6 +210,9 @@ export interface Snapshot {
 export interface Plan {
   id: string;
   mode: string;
+  confirmation: string;
+  netra?: boolean;
+  shadow?: Record<string, ShadowReplay>;
   effects: string;
   expires: number;
   blockers: string[];
@@ -115,7 +237,7 @@ export interface Incident {
 export interface AlertRule {
   id: string;
   name: string;
-  kind: 'metric' | 'health' | 'stale' | 'job';
+  kind: 'metric' | 'health' | 'stale' | 'job' | 'ebpf' | 'isolation' | 'isolation-enforce';
   metric?: string;
   threshold?: number;
   severity: 'info' | 'warning' | 'critical';

@@ -4,7 +4,11 @@ import type { Page } from './lib/navGroups';
 import type { Device, Session, Snapshot } from './types';
 
 export type PlanAction = 'isolate' | 'release' | 'deploy' | 'upgrade';
-export type DialogState = { kind: 'plan'; action: PlanAction; devices: string[] } | { kind: 'inspect'; device: Device } | null;
+export interface PlanPreset {
+  stage?: 'shadow' | 'enforce';
+  policy?: { name: string; tenant: string; cidr: string; ports: number[] };
+}
+export type DialogState = { kind: 'plan'; action: PlanAction; devices: string[]; preset?: PlanPreset } | { kind: 'inspect'; device: Device } | null;
 
 interface Fleet {
   session: Session;
@@ -19,6 +23,7 @@ interface Fleet {
   dialog: DialogState;
   closeDialog: () => void;
   openPlan: (action: PlanAction) => void;
+  openPlanFor: (action: PlanAction, devices: string[], preset?: PlanPreset) => void;
   inspect: (deviceId: string) => void;
   isAdmin: boolean;
 }
@@ -97,6 +102,7 @@ export function FleetProvider({
       }
       setDialog({ kind: 'plan', action, devices: [...selected] });
     },
+    openPlanFor: (action, devices, preset) => setDialog({ kind: 'plan', action, devices, preset }),
     inspect: (id) => {
       const device = snapshot?.devices.find((d) => d.id === id);
       if (device) setDialog({ kind: 'inspect', device });

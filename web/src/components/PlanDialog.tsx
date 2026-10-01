@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
-import { metric, parsePorts, sourceLabel, when } from '../lib/format';
-import { useResource, type DialogState, type PlanAction } from '../store';
+import { bytes, metric, parsePorts, sourceLabel, when } from '../lib/format';
+import { useFleet, useResource, type DialogState, type PlanAction, type PlanPreset } from '../store';
 import type { Device, History, Job, Plan } from '../types';
 import { Badge, Sparkline, Table } from './kit';
 
@@ -31,7 +31,9 @@ export default function PlanDialog({
 
   return (
     <dialog ref={ref} className="dv-dialog card" onClose={onClose} aria-labelledby="dialog-title">
-      {state?.kind === 'plan' && <PlanForm key={state.action + state.devices.join()} action={state.action} devices={state.devices} onClose={onClose} onApplied={onApplied} />}
+      {state?.kind === 'plan' && (
+        <PlanForm key={state.action + state.devices.join() + (state.preset?.stage || '')} action={state.action} devices={state.devices} preset={state.preset} onClose={onClose} onApplied={onApplied} />
+      )}
       {state?.kind === 'inspect' && <Inspect device={state.device} onClose={onClose} />}
     </dialog>
   );
@@ -68,6 +70,20 @@ function Inspect({ device: d, onClose }: { device: Device; onClose: () => void }
     ['Capabilities', d.capabilities.join(', ')],
     ['Last report', when(d.last_seen)],
   ];
+  if (d.ebpf) {
+    const e = d.ebpf;
+    rows.push(
+      ['Netra node', `${e.node}${e.stale ? ' (agent stale)' : ''}`],
+      ['Kernel', `${e.kernel || 'Unknown'} · BTF ${e.btf === null ? 'unknown' : e.btf ? 'yes' : 'no'}`],
+      ['eBPF programs', `${e.attached} attached · ${e.programs.join(', ') || 'none reported'}`],
+      ['Packets / s', metric(d.metrics.pps)],
+      ['TCP retransmits / min', metric(d.metrics.tcp_retransmits_pm)],
+      ['TCP resets / min', metric(d.metrics.tcp_resets_pm)],
+      ['Top drop reasons', e.drop_reasons.map((r) => `${r.reason} ${r.count}`).join(', ') || e.drop_info_unavailable || 'None'],
+      ['Top talkers', e.talkers.slice(0, 3).map((t) => `${t.peer}:${t.port} ${bytes(t.bytes)}`).join(', ') || 'None in window'],
+      ['Node isolation', e.isolation ? `${e.isolation.mode} · would block ${e.isolation.would_block_packets} · blocked ${e.isolation.blocked_packets}` : e.nodeiso_available ? 'Available, none set' : 'Not attached'],
+    );
+  }
   return (
     <div>
       <Head eyebrow="DEVICE" title={d.id} note={`${d.model} · ${sourceLabel(d.source)}`} onClose={onClose} />
@@ -95,12 +111,31 @@ function Inspect({ device: d, onClose }: { device: Device; onClose: () => void }
   );
 }
 
-function PlanForm({ action, devices, onClose, onApplied }: { action: PlanAction; devices: string[]; onClose: () => void; onApplied: (job: Job) => void }) {
+function PlanForm({
+  action,
+  devices,
+  preset,
+  onClose,
+  onApplied,
+}: {
+  action: PlanAction;
+  devices: string[];
+  preset?: PlanPreset;
+  onClose: () => void;
+  onApplied: (job: Job) => void;
+}) {
+  const { snapshot } = useFleet();
+  const netra = devices.some((id) => {
+    const d = snapshot?.devices.find((x) => x.id === id);
+    return Boolean(d?.ebpf) && d?.source !== 'simulator';
+  });
+  const [stage, setStage] = useState<'shadow' | 'enforce'>(preset?.stage || 'shadow');
+  const [typed, setTyped] = useState('');
   const [fields, setFields] = useState({
-    name: 'tenant-private',
-    tenant: 'tenant-a',
-    cidr: '10.42.0.0/16',
-    ports: '443,8443',
+    name: preset?.policy?.name || 'tenant-private',
+    tenant: preset?.policy?.tenant || 'tenant-a',
+    cidr: preset?.policy?.cidr || '10.42.0.0/16',
+    ports: preset?.policy ? preset.policy.ports.join(',') : '443,8443',
     service: 'network-observer',
     image: '',
     firmware: 'demo-2.0',
@@ -125,6 +160,7 @@ function PlanForm({ action, devices, onClose, onApplied }: { action: PlanAction;
         return;
       }
       spec.policy = { name: fields.name, tenant: fields.tenant, cidr: fields.cidr, ports };
+      if (netra) spec.stage = stage;
     }
     if (action === 'deploy') Object.assign(spec, { service: fields.service, image: fields.image });
     if (action === 'upgrade') spec.firmware = fields.firmware;
@@ -143,7 +179,7 @@ function PlanForm({ action, devices, onClose, onApplied }: { action: PlanAction;
     setBusy(true);
     setError('');
     try {
-      onApplied(await api<Job>(`plans/${plan.id}/apply`, 'POST', { confirmation: 'APPLY SIMULATION' }));
+      onApplied(await api<Job>(`plans/${plan.id}/apply`, 'POST', { confirmation: plan.confirmation }));
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -168,6 +204,28 @@ function PlanForm({ action, devices, onClose, onApplied }: { action: PlanAction;
             {input('tenant', 'Tenant')}
             {input('cidr', 'Allowed destination CIDR')}
             {input('ports', 'Allowed ports (comma separated; empty = all)')}
+            {netra && (
+              <label className="tokenbox" htmlFor="f-stage">
+                Stage
+                <select
+                  id="f-stage"
+                  value={stage}
+                  onChange={(e) => {
+                    setStage(e.target.value as 'shadow' | 'enforce');
+                    setPlan(null);
+                  }}
+                >
+                  <option value="shadow">Shadow: count what would be blocked</option>
+                  <option value="enforce">Enforce: drop new flows outside the allow-list</option>
+                </select>
+              </label>
+            )}
+            {netra && (
+              <p className="dv-fine">
+                Netra applies this as node isolation in the kernel. Shadow never drops. Enforce needs a shadow run of the same allow-list, holds a renewable lease, and falls back to shadow if
+                Duvora or the controller goes away. SSH (22), ICMP, DHCP and the Netra controller stay reachable.
+              </p>
+            )}
           </>
         )}
         {action === 'deploy' && (
@@ -183,7 +241,9 @@ function PlanForm({ action, devices, onClose, onApplied }: { action: PlanAction;
             <p className="dv-fine">Simulates drain, update, and verify. No firmware artifact is downloaded or flashed.</p>
           </>
         )}
-        {action === 'release' && <p className="dv-fine">Removes every simulated isolation policy from the selected devices.</p>}
+        {action === 'release' && (
+          <p className="dv-fine">{netra ? 'Removes the Netra node isolation from the selected devices.' : 'Removes every simulated isolation policy from the selected devices.'}</p>
+        )}
       </div>
       {plan && (
         <div className="dv-plan" role="status">
@@ -196,11 +256,34 @@ function PlanForm({ action, devices, onClose, onApplied }: { action: PlanAction;
               </li>
             ))}
           </ul>
+          {plan.shadow && (
+            <Table heads={['Device', 'Flows checked', 'Would block', 'Top would-block destinations']} label="Shadow replay">
+              {Object.entries(plan.shadow).map(([id, r]) => (
+                <tr key={id}>
+                  <td>{id}</td>
+                  <td>{r.flows}</td>
+                  <td>
+                    {r.would_block_flows} flows · {bytes(r.would_block_bytes)}
+                  </td>
+                  <td className="dv-mono">{r.top.map((t) => `${t.peer}:${t.port}`).join(', ') || 'None'}</td>
+                </tr>
+              ))}
+            </Table>
+          )}
+          {plan.shadow && <p className="dv-fine">Replayed from the last {Math.round(Object.values(plan.shadow)[0].window / 60)} minutes of Netra flow records.</p>}
           <p className="dv-fine">Expires {when(plan.expires)}</p>
           {plan.blockers.length ? (
             <p className="login-error">{plan.blockers.join(' · ')}</p>
+          ) : plan.netra ? (
+            <p className="dv-fine">Netra will change the kernel isolation on the node. Confirm with: {plan.confirmation}</p>
           ) : (
             <p className="dv-fine">Only the local simulation model will change.</p>
+          )}
+          {!plan.blockers.length && plan.confirmation.startsWith('ENFORCE') && (
+            <label className="tokenbox" htmlFor="f-confirm">
+              Type {plan.confirmation} to confirm
+              <input id="f-confirm" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" />
+            </label>
           )}
         </div>
       )}
@@ -211,8 +294,8 @@ function PlanForm({ action, devices, onClose, onApplied }: { action: PlanAction;
       )}
       <div className="dv-dialog-actions">
         {plan && !plan.blockers.length ? (
-          <button type="button" className="primary" onClick={apply} disabled={busy}>
-            Apply simulation
+          <button type="button" className="primary" onClick={apply} disabled={busy || (plan.confirmation.startsWith('ENFORCE') && typed !== plan.confirmation)}>
+            {plan.netra ? (plan.mode === 'netra-enforce' ? 'Enforce on Netra' : plan.mode === 'netra-release' ? 'Release on Netra' : 'Apply shadow on Netra') : 'Apply simulation'}
           </button>
         ) : (
           <button type="submit" className="primary" disabled={busy}>

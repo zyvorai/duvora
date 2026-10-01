@@ -1,6 +1,6 @@
 # HTTP API
 
-Base path: `/api/v1`. API version is `v1`; payload version is `0.2.0`. Except `/healthz`, `POST /api/v1/session` and the console's static files, every request must authenticate with one of:
+Base path: `/api/v1`. API version is `v1`; payload version is `0.3.0`. Except `/healthz`, `POST /api/v1/session` and the console's static files, every request must authenticate with one of:
 
 - the `duvora_session` cookie set by signing in (HttpOnly, `SameSite=Strict`, `Secure` over HTTPS, 12-hour lifetime, revocable server-side);
 - `Authorization: Bearer dvr_…` — a personal API token created by a named user (`duvoractl login` creates one);
@@ -28,10 +28,20 @@ Request bodies (POST, PUT, PATCH) must be a JSON object with `Content-Type: appl
 | GET | `/api/v1/devices/{id}/history?window=1h\|24h\|7d` | Viewer | Telemetry points (raw for 1h, 5-minute buckets for 24h, hourly for 7d) |
 | GET | `/api/v1/topology` | Viewer | Nodes (site, host, dpu, policy) and edges (contains, hosts, isolates) |
 | POST | `/api/v1/reports` | Host-bound agent key | Accepted observed inventory |
-| POST | `/api/v1/plans` | Admin | Preview with mode, blockers, expiry, target revisions |
-| POST | `/api/v1/plans/{id}/apply` | Plan's admin principal | Idempotent queued simulation job |
-| POST | `/api/v1/jobs/{id}/rollback` | Admin | Eligible simulation snapshot rollback |
+| POST | `/api/v1/plans` | Admin | Preview with mode, blockers, expiry, target revisions, the `confirmation` phrase, and (for isolate) a `shadow` replay of Netra flow records |
+| POST | `/api/v1/plans/{id}/apply` | Plan's admin principal | Idempotent queued job (`mode` `simulation` or `netra`) |
+| POST | `/api/v1/jobs/{id}/rollback` | Admin | Eligible rollback; a Netra rollback restores the previous allow-list in shadow and never re-enforces |
 | POST | `/api/v1/evaluate` | Admin | Model-only allow/deny verdict |
+
+## eBPF (Netra)
+
+| Method | Endpoint | Role | Result |
+|---|---|---|---|
+| GET | `/api/v1/ebpf` | Viewer | Netra connection (`connected`, `isolation_supported`, `enforce_allowed`, `kill_switch`, `unmatched` nodes) and per-device probe: kernel, BTF, attached programs, node isolation status, Duvora's requested isolation |
+| GET | `/api/v1/devices/{id}/ebpf` | Viewer | One device: measured metrics, drop reasons, TCP availability, top talkers, node isolation counters |
+| POST | `/api/v1/ebpf/kill-switch` | Admin | `{"engaged":true\|false}`. Engaging demotes every enforced node to shadow now and refuses enforce plans until released; returns `demoted` and `errors` |
+
+See [EBPF.md](EBPF.md) for the stages, gates and failure behavior.
 
 ## Monitoring and reports
 
@@ -40,7 +50,7 @@ Request bodies (POST, PUT, PATCH) must be a JSON object with `Content-Type: appl
 | GET | `/api/v1/incidents?state=open\|acknowledged\|resolved\|active` | Viewer | Incidents, newest first (`active` = open or acknowledged) |
 | POST | `/api/v1/incidents/{id}/ack` | Admin | Acknowledge an open incident |
 | POST | `/api/v1/incidents/{id}/resolve` | Admin | Resolve an incident |
-| GET | `/api/v1/alert-rules` | Viewer | Rules: temperature-high, packet-drops, health-degraded, device-stale, job-failed |
+| GET | `/api/v1/alert-rules` | Viewer | Rules: temperature-high, packet-drops, health-degraded, device-stale, job-failed, tcp-retransmits, tcp-resets, ebpf-detached, isolation-would-block, isolation-blocked |
 | PUT | `/api/v1/alert-rules/{id}` | Admin | `{"enabled","threshold","severity"}` (any subset) |
 | GET | `/api/v1/scorecard` | Viewer | Fleet score 0–100 (or null with no devices), grade, weighted parts |
 | GET | `/api/v1/report` | Viewer | Shift briefing as JSON, including `markdown` |
@@ -66,8 +76,16 @@ Request bodies (POST, PUT, PATCH) must be a JSON object with `Content-Type: appl
 
 Plan examples are in `examples/`. Supported actions: `isolate`, `release`, `deploy`, `upgrade`. Unknown fields are rejected. Targets are explicit IDs; selectors cannot silently expand after preview.
 
+Apply with the plan's `confirmation` phrase: `APPLY SIMULATION` for simulation plans, `APPLY SHADOW` or `APPLY RELEASE` for Netra plans, and `ENFORCE ON <device>` to enforce.
+
 ```json
 {"confirmation":"APPLY SIMULATION"}
+```
+
+Netra isolation plan (`stage` is `shadow` by default; `enforce` needs the same allow-list already in shadow, one device, `DUVORA_NETRA_ENFORCE=1`, and the kill switch released):
+
+```json
+{"action":"isolate","devices":["netra-node-1"],"stage":"shadow","policy":{"name":"egress","tenant":"ops","cidr":"10.0.0.0/8","ports":[443]}}
 ```
 
 ```json

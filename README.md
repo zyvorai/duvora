@@ -18,7 +18,7 @@
 
 </div>
 
-> **Status: 0.2.0 is a runnable evaluation release.** It implements a complete local simulation workflow and read-only hardware inventory bridges. It does not flash firmware, provision physical DPUs, launch DPU containers, enforce hardware policies, or accelerate storage. See the [capability matrix](docs/STATUS.md) before using it.
+> **Status: 0.3.0 is a runnable evaluation release.** It implements a complete local simulation workflow, read-only hardware inventory bridges, and, through [Netra](https://github.com/zyvorai/netra), eBPF telemetry and node isolation in shadow or leased enforce mode ([docs/EBPF.md](docs/EBPF.md)). It does not flash firmware, provision physical DPUs, launch DPU containers, enforce DPU hardware policies, or accelerate storage. See the [capability matrix](docs/STATUS.md) before using it.
 
 One standalone workspace for DPU inventory, service plans, tenant isolation models, operational telemetry, incidents, and change evidence. One server, one API, one CLI, one console. CLI: `duvoractl`.
 

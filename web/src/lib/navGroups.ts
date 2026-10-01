@@ -29,14 +29,14 @@ export const navGroups: NavGroup[] = [
     children: [
       { page: 'devices', label: 'Devices', blurb: 'Search, filter, select, and inspect every DPU and its observation source.' },
       { page: 'topology', label: 'Topology', blurb: 'Sites, hosts, DPUs, and isolation policies as one graph.' },
-      { page: 'telemetry', label: 'Telemetry', blurb: 'Reported counters with per-device history and trends.' },
+      { page: 'telemetry', label: 'Telemetry', blurb: 'Reported and kernel-measured counters, drop reasons, TCP health, and talkers.' },
     ],
   },
   {
     label: 'Operate',
     children: [
       { page: 'services', label: 'Services', blurb: 'Digest-pinned service images and simulated reconciliation.' },
-      { page: 'isolation', label: 'Isolation', blurb: 'Reviewed allow-list plans, modeled verdicts, and release.' },
+      { page: 'isolation', label: 'Isolation', blurb: 'Allow-list plans, Netra shadow and enforce, kill switch, and release.' },
       { page: 'operations', label: 'Operations', blurb: 'Durable jobs, workflow steps, and eligible rollback.' },
     ],
   },
@@ -54,7 +54,7 @@ export const navGroups: NavGroup[] = [
     children: [
       { page: 'audit', label: 'Audit trail', blurb: 'Principal, timestamp, action, and details for every change.' },
       { page: 'users', label: 'Users & access', blurb: 'Named users, roles, passwords, and personal API tokens.' },
-      { page: 'capabilities', label: 'Capabilities', blurb: 'What ships, what is simulated, and what is unavailable.' },
+      { page: 'capabilities', label: 'Capabilities', blurb: 'Adapters plus the per-node eBPF capability probe.' },
     ],
   },
 ];

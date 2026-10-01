@@ -1,5 +1,5 @@
 export const sourceLabel = (s: string) =>
-  ({ simulator: 'Simulated', 'linux-pci': 'Linux PCI', 'nvidia-dpf': 'NVIDIA DPF' })[s] || s;
+  ({ simulator: 'Simulated', 'linux-pci': 'Linux PCI', 'nvidia-dpf': 'NVIDIA DPF', 'netra-ebpf': 'Netra eBPF' })[s] || s;
 
 export const when = (seconds: number | null | undefined) =>
   seconds ? new Date(seconds * 1000).toLocaleString() : '—';
@@ -26,4 +26,24 @@ export function parsePorts(text: string): number[] | null {
   if (!text.trim()) return [];
   const ports = text.split(',').map((x) => Number(x.trim()));
   return ports.every((p) => Number.isInteger(p) && p >= 1 && p <= 65535) ? ports : null;
+}
+
+export function bytes(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return 'Unknown';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = value;
+  let i = 0;
+  while (v >= 1000 && i < units.length - 1) {
+    v /= 1000;
+    i += 1;
+  }
+  return `${i ? v.toFixed(1) : v} ${units[i]}`;
+}
+
+/** Seconds until an epoch-seconds deadline, as "12m 30s"; "expired" once past. */
+export function remaining(until: number | null | undefined, now = Date.now() / 1000): string {
+  if (!until) return '—';
+  const d = Math.round(until - now);
+  if (d <= 0) return 'expired';
+  return d >= 60 ? `${Math.floor(d / 60)}m ${d % 60}s` : `${d}s`;
 }

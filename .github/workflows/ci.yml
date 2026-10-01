@@ -66,6 +66,23 @@ jobs:
           trap 'kill "$server_pid"' EXIT
           python -c "import urllib.request,time; [time.sleep(.2) for _ in range(10)]; urllib.request.urlopen('http://127.0.0.1:8787/healthz')"
           node tests/e2e.cjs
+      - name: Exercise Netra node-isolation workflow against a fake Netra
+        env:
+          DUVORA_NETRA_URL: http://127.0.0.1:18870
+          DUVORA_NETRA_API_KEY: netra-test-key-0123456789abcdef
+          DUVORA_NETRA_DISCOVER: '1'
+          DUVORA_NETRA_ENFORCE: '1'
+          DUVORA_NETRA_INTERVAL: '5'
+          DUVORA_URL: http://127.0.0.1:8797
+        run: |
+          FAKE_NETRA_PORT=18870 python tests/fake_netra.py > /tmp/fake-netra.log 2>&1 &
+          fake_pid=$!
+          DUVORA_PORT=8797 python -m duvora.server --demo --db /tmp/netra.db > /tmp/netra-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" "$fake_pid"' EXIT
+          python -c "import urllib.request,time; [time.sleep(.2) for _ in range(15)]; urllib.request.urlopen('http://127.0.0.1:8797/healthz')"
+          sleep 6
+          node tests/e2e_netra.cjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -2,12 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { errorMessage } from '../api';
 import { scoreTone, healthTone, severityTone } from '../components/kit';
 import { layout } from '../pages/Topology';
-import { ago, metric, parsePorts, sourceLabel } from './format';
+import { ago, bytes, metric, parsePorts, remaining, sourceLabel } from './format';
 
 describe('format', () => {
   it('labels sources', () => {
     expect(sourceLabel('linux-pci')).toBe('Linux PCI');
     expect(sourceLabel('other')).toBe('other');
+    expect(sourceLabel('netra-ebpf')).toBe('Netra eBPF');
   });
 
   it('keeps missing metrics unknown', () => {
@@ -19,6 +20,14 @@ describe('format', () => {
   it('formats relative time', () => {
     expect(ago(100, 130)).toBe('30s ago');
     expect(ago(0, 7200)).toBe('2h ago');
+  });
+
+  it('formats byte counts and lease time', () => {
+    expect(bytes(512)).toBe('512 B');
+    expect(bytes(1_500_000)).toBe('1.5 MB');
+    expect(remaining(null)).toBe('—');
+    expect(remaining(100, 200)).toBe('expired');
+    expect(remaining(950, 200)).toBe('12m 30s');
   });
 
   it('parses ports', () => {

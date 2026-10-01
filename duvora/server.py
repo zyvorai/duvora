@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from .auth import DEFAULT_ADMIN_PASSWORD, SESSION_TTL
 from .core import Problem, Store
+from .netra import NetraClient, collect
 
 STATIC = Path(os.environ.get("DUVORA_WEB_DIR") or Path(__file__).with_name("static"))
 SESSION_COOKIE = "duvora_session"
@@ -48,6 +49,9 @@ class Application:
         r("GET", "/export", "viewer", lambda c: self.store.snapshot())
         r("GET", "/metrics", "viewer", self.metrics)
         r("GET", "/devices/{id}/history", "viewer", lambda c: self.store.history(c.args["id"], c.query.get("window", "1h")))
+        r("GET", "/devices/{id}/ebpf", "viewer", lambda c: self.store.device_ebpf(c.args["id"]))
+        r("GET", "/ebpf", "viewer", lambda c: self.store.ebpf_overview())
+        r("POST", "/ebpf/kill-switch", "admin", lambda c: self.store.kill_switch(c.actor, c.body.get("engaged")))
         r("GET", "/incidents", "viewer", lambda c: self.store.incidents(c.query.get("state")))
         r("POST", "/incidents/{id}/{action}", "admin", lambda c: self.store.incident_action(c.actor, c.args["id"], c.args["action"]))
         r("GET", "/alert-rules", "viewer", lambda c: self.store.alert_rules())
@@ -104,7 +108,7 @@ class Application:
     def metrics(self, c):
         snapshot = self.store.snapshot()
         lines = ["# HELP duvora_devices Device inventory by observation source", "# TYPE duvora_devices gauge"]
-        for source in ("simulator", "linux-pci", "nvidia-dpf"):
+        for source in ("simulator", "linux-pci", "nvidia-dpf", "netra-ebpf"):
             lines.append(f'duvora_devices{{source="{source}"}} {sum(d["source"] == source for d in snapshot["devices"])}')
         lines += ["# TYPE duvora_jobs gauge", f'duvora_jobs {len(snapshot["jobs"])}',
                   "# TYPE duvora_open_incidents gauge", f'duvora_open_incidents {snapshot["open_incidents"]}']
@@ -297,6 +301,28 @@ def load_keys():
     return keys
 
 
+def netra_sync(store, client, stop, interval=None):
+    """Poll Netra outside the store lock, then merge; also carries isolation duties to Netra."""
+    interval = interval or max(5, int(os.environ.get("DUVORA_NETRA_INTERVAL", "15") or 15))
+    while True:
+        try:
+            raw = collect(client, store.netra_wanted_nodes())
+            store.ingest_netra(raw)
+            store.netra_duties(client)
+        except Exception as exc:
+            print(f"Netra sync error: {type(exc).__name__}: {exc}"[:300], flush=True)
+        # Applied Netra jobs wake the loop so they do not wait a whole polling interval.
+        for _ in range(interval):
+            if stop.wait(1):
+                return
+            if store.netra_wake.is_set():
+                store.netra_wake.clear()
+                try:
+                    store.netra_duties(client)
+                except Exception as exc:
+                    print(f"Netra job error: {type(exc).__name__}: {exc}"[:300], flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Duvora control plane and console")
     parser.add_argument("--host", default="127.0.0.1")
@@ -313,7 +339,13 @@ def main():
     if args.host not in LOOPBACK and not (os.environ.get("DUVORA_KEYS") or os.environ.get("DUVORA_ADMIN_PASSWORD")):
         parser.error("Network binding requires DUVORA_ADMIN_PASSWORD or DUVORA_KEYS")
     keys = load_keys()
+    try:
+        netra = NetraClient.from_env()
+    except ValueError as exc:
+        parser.error(str(exc))
     store = Store(args.db, args.demo)
+    if netra:
+        store.configure_netra(netra.url, os.environ.get("DUVORA_NETRA_ENFORCE") == "1", netra)
     app = Application(store, keys)
     httpd = ThreadingHTTPServer((args.host, args.port), handler(app, tls=bool(args.tls_cert)))
     if args.tls_cert:
@@ -333,6 +365,8 @@ def main():
 
     worker = threading.Thread(target=reconcile, daemon=True)
     worker.start()
+    if netra:
+        threading.Thread(target=netra_sync, args=(store, netra, stop), daemon=True).start()
 
     def shutdown(*_):
         threading.Thread(target=httpd.shutdown, daemon=True).start()

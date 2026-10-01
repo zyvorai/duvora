@@ -63,6 +63,14 @@ The script syncs the repository to `~/.deployments/duvora`, installs k3s and Hel
 
 Set `DUVORA_ADMIN_PASSWORD` (default `Admin@321`), `DUVORA_KEYS`, or `DUVORA_DEMO=0` before running. The deploy refuses to run above `DUVORA_DEPLOY_MAX_DISK_PCT` (95%) root-disk usage and re-imports the image if kubelet's image garbage collection removed it.
 
+## Netra eBPF
+
+Set `DUVORA_NETRA_URL` (HTTPS unless loopback) and `DUVORA_NETRA_API_KEY` to connect a [Netra](https://github.com/zyvorai/netra) controller; `DUVORA_NETRA_CA_FILE` pins a self-signed certificate. Devices map to Netra nodes by `DUVORA_NETRA_NODE_MAP` (JSON of device id or host to node), by host name, or, with `DUVORA_NETRA_DISCOVER=1`, as new `netra-<node>` devices. `DUVORA_NETRA_INTERVAL` (default 15 s) sets the polling period.
+
+Node isolation needs a Netra admin key and a Netra build with `/api/v1/ebpf/node-isolation`. Enforcement is off unless `DUVORA_NETRA_ENFORCE=1`; enforce leases last `DUVORA_NETRA_LEASE` seconds (default 900) and are renewed while Duvora runs. Engage the kill switch (console **Operate → Isolation**, or `duvoractl kill-switch on`) to send every node back to shadow. Details: [EBPF.md](EBPF.md).
+
+`deploy-remote.sh` connects automatically when the host runs Netra in the same k3s cluster (`netra-system/netra` and `~/.netra/api-key`); `DUVORA_NETRA=off` skips it and `DUVORA_NETRA_ENFORCE=1` allows enforcement.
+
 ## Helm chart
 
 ```bash

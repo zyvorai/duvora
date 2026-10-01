@@ -268,8 +268,13 @@ function Console({
         onClose={closeDialog}
         onApplied={(job) => {
           closeDialog();
-          toast(`Simulation job queued: ${job.action}`);
-          goPage('operations');
+          if (job.mode === 'netra') {
+            toast(`Netra job queued: ${job.action}${job.spec.stage ? ` (${String(job.spec.stage)})` : ''}`);
+            goPage('isolation');
+          } else {
+            toast(`Simulation job queued: ${job.action}`);
+            goPage('operations');
+          }
           void refresh();
         }}
       />

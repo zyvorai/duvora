@@ -163,7 +163,23 @@ def build_parser():
     users.add_argument("username", nargs="?")
     users.add_argument("--role", choices=["admin", "viewer"])
     sub.add_parser("backup").add_argument("file")
+    sub.add_parser("ebpf", help="Netra eBPF overview, or one device's kernel observations").add_argument("device", nargs="?")
+    sh = sub.add_parser("shadow", help="Run an allow-list in Netra shadow mode on a device (counts, never drops)")
+    sh.add_argument("device"); sh.add_argument("--cidr", required=True); sh.add_argument("--ports", default="", help="Comma-separated; empty = all")
+    sh.add_argument("--name", default="duvoractl"); sh.add_argument("--tenant", default="default")
+    sh.add_argument("--yes", action="store_true", help="Apply the shadow plan without a second step")
+    en = sub.add_parser("enforce", help="Promote a device's shadow allow-list to enforcement (prints the plan unless --confirm)")
+    en.add_argument("device"); en.add_argument("--confirm", help="Must be ENFORCE ON <device>")
+    ks = sub.add_parser("kill-switch", help="Engage (on) or release (off) the eBPF enforcement kill switch")
+    ks.add_argument("state", choices=["on", "off"])
     return p
+
+
+def ports_arg(text):
+    try:
+        return sorted({int(x) for x in text.split(",") if x.strip()})
+    except ValueError:
+        raise ValueError("--ports must be comma-separated integers") from None
 
 
 def run(args, token):
@@ -220,6 +236,23 @@ def run(args, token):
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         return {"saved": args.file, "bytes": len(data)}
+    if c == "ebpf":
+        return call(f"/api/v1/devices/{quote(args.device)}/ebpf" if args.device else "/api/v1/ebpf")
+    if c == "kill-switch":
+        return call("/api/v1/ebpf/kill-switch", {"engaged": args.state == "on"})
+    if c in {"shadow", "enforce"}:
+        if c == "shadow":
+            policy = {"name": args.name, "tenant": args.tenant, "cidr": args.cidr, "ports": ports_arg(args.ports)}
+        else:
+            device = next((d for d in call("/api/v1/snapshot")["devices"] if d["id"] == args.device), None)
+            current = (device or {}).get("netra_isolation")
+            if not current or current.get("stage") != "shadow":
+                raise ValueError(f"{args.device} has no shadow allow-list to promote; run `duvoractl shadow` first")
+            policy = current["policy"]
+        plan = call("/api/v1/plans", {"action": "isolate", "devices": [args.device], "policy": policy, "stage": c})
+        if plan["blockers"] or not (args.yes if c == "shadow" else args.confirm):
+            return plan
+        return call(f"/api/v1/plans/{quote(plan['id'])}/apply", {"confirmation": plan["confirmation"] if c == "shadow" else args.confirm})
     result = call("/api/v1/snapshot")
     return result if c == "status" else result[c]
 

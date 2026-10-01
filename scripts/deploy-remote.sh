@@ -18,6 +18,9 @@
 #   DUVORA_ADMIN_PASSWORD   initial admin password (default Admin@321; applied on first start only)
 #   DUVORA_KEYS             optional JSON access/agent keys, stored in the Secret
 #   DUVORA_DEMO             1 (default) seeds the fleet simulator with demo devices
+#   DUVORA_NETRA            auto (default): connect to Netra when the host runs it in the same
+#                           cluster (netra-system/netra + ~/.netra/api-key); off disables
+#   DUVORA_NETRA_ENFORCE    1 allows promoting Netra shadow isolation to enforcement (default 0)
 #   DUVORA_REMOTE_SUBDIR    remote checkout relative to $HOME (default .deployments/duvora)
 #   DUVORA_DEPLOY_MAX_DISK_PCT   refuse above this root-disk usage (default 95)
 #   DUVORA_DEPLOY_READY_TIMEOUT  seconds to wait for the rollout (default 600)
@@ -36,7 +39,7 @@ VERIFY_ONLY=false
 TARGET=""
 POSITIONAL=()
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30)
-VERSION="0.2.0"
+VERSION="0.3.0"
 IMAGE="ghcr.io/zyvorai/duvora:${VERSION}"
 PORT=30880
 
@@ -79,6 +82,8 @@ fi
 ADMIN_PASSWORD="${DUVORA_ADMIN_PASSWORD:-Admin@321}"
 KEYS="${DUVORA_KEYS:-}"
 DEMO="${DUVORA_DEMO:-1}"
+NETRA="${DUVORA_NETRA:-auto}"
+NETRA_ENFORCE="${DUVORA_NETRA_ENFORCE:-0}"
 MAX_DISK="${DUVORA_DEPLOY_MAX_DISK_PCT:-95}"
 READY_TIMEOUT="${DUVORA_DEPLOY_READY_TIMEOUT:-600}"
 SUBDIR="${DUVORA_REMOTE_SUBDIR:-.deployments/duvora}"
@@ -116,6 +121,8 @@ PORT=${PORT}
 ADMIN_PASSWORD=$(q "$ADMIN_PASSWORD")
 KEYS=$(q "$KEYS")
 DEMO=$(q "$DEMO")
+NETRA=$(q "$NETRA")
+NETRA_ENFORCE=$(q "$NETRA_ENFORCE")
 log() { printf '[duvora-remote] %s\n' "\$*"; }
 
 used=\$(df -P / | awk 'NR==2 {gsub("%","",\$5); print \$5}')
@@ -247,9 +254,34 @@ else
   fi
   ensure_image
 
+  # Netra in the same cluster: reach it by service name and pin its serving certificate.
+  NETRA_URL="" NETRA_KEY="" NETRA_CA=""
+  if [[ "\$NETRA" != "off" && -r "\$HOME/.netra/api-key" ]] && kubectl -n netra-system get svc netra >/dev/null 2>&1; then
+    svc_port="\$(kubectl -n netra-system get svc netra -o jsonpath='{.spec.ports[0].port}')"
+    node_port="\$(kubectl -n netra-system get svc netra -o jsonpath='{.spec.ports[0].nodePort}')"
+    # Netra's deploy keeps a stable cert in ~/.netra/tls.crt; older installs mint one per pod start.
+    if [[ -s "\$HOME/.netra/tls.crt" ]]; then
+      NETRA_CA="\$(cat "\$HOME/.netra/tls.crt")"
+    else
+      log "warning: ~/.netra/tls.crt missing; pinning the current Netra certificate, which changes when Netra restarts"
+      NETRA_CA="\$(echo | openssl s_client -connect "127.0.0.1:\${node_port:-\$svc_port}" -servername netra.netra-system.svc 2>/dev/null | openssl x509 2>/dev/null || true)"
+    fi
+    if [[ -n "\$NETRA_CA" ]]; then
+      NETRA_URL="https://netra.netra-system.svc:\$svc_port"
+      NETRA_KEY="\$(cat "\$HOME/.netra/api-key")"
+      log "connecting to Netra at \$NETRA_URL (enforcement \$([[ "\$NETRA_ENFORCE" == 1 ]] && echo allowed || echo disabled))"
+    else
+      log "warning: Netra found but its certificate could not be read; skipping the Netra bridge"
+    fi
+  fi
+
   # --set splits on commas, so the password and JSON keys go through a private values file (JSON is YAML).
   VALUES="\$(mktemp)"; chmod 600 "\$VALUES"; trap 'rm -f "\$VALUES"' EXIT
-  P="\$ADMIN_PASSWORD" K="\$KEYS" D="\$DEMO" python3 -c 'import json, os; print(json.dumps({"auth": {"adminPassword": os.environ["P"], "keys": os.environ["K"]}, "demo": os.environ["D"] == "1"}))' > "\$VALUES"
+  P="\$ADMIN_PASSWORD" K="\$KEYS" D="\$DEMO" NU="\$NETRA_URL" NK="\$NETRA_KEY" NC="\$NETRA_CA" NE="\$NETRA_ENFORCE" python3 -c 'import json, os
+v = {"auth": {"adminPassword": os.environ["P"], "keys": os.environ["K"]}, "demo": os.environ["D"] == "1"}
+if os.environ["NU"]:
+    v["netra"] = {"url": os.environ["NU"], "apiKey": os.environ["NK"], "caCert": os.environ["NC"] + "\\n", "enforce": os.environ["NE"] == "1"}
+print(json.dumps(v))' > "\$VALUES"
   helm upgrade --install duvora ./helm/duvora \
     --namespace duvora --create-namespace \
     -f "\$VALUES" \

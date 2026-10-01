@@ -40,6 +40,13 @@ class HTTPTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as exc:self.call('/api/v1/plans','v'*24,{'action':'release','devices':['bf3-01']})
         self.assertEqual(exc.exception.code,403)
 
+    def test_kill_switch_admin_only(self):
+        with self.assertRaises(urllib.error.HTTPError) as exc:self.call('/api/v1/ebpf/kill-switch','v'*24,{'engaged':True})
+        self.assertEqual(exc.exception.code,403)
+        self.assertTrue(self.call('/api/v1/ebpf/kill-switch',body={'engaged':True})['engaged'])
+        self.assertTrue(self.call('/api/v1/ebpf')['netra']['kill_switch']['engaged'])
+        self.assertFalse(self.call('/api/v1/ebpf/kill-switch',body={'engaged':False})['engaged'])
+
     def test_health_public(self):
         with urllib.request.urlopen(self.url+'/healthz') as r:self.assertEqual(json.load(r)['status'],'ok')
 
@@ -75,7 +82,7 @@ class HTTPTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'HTTPS'):request('http://example.com','token','/api/v1/snapshot')
 
     def test_export_round_trip(self):
-        self.assertEqual(self.call('/api/v1/export')['version'],'0.2.0')
+        self.assertEqual(self.call('/api/v1/export')['version'],'0.3.0')
 
     def test_unknown_endpoint(self):
         with self.assertRaises(urllib.error.HTTPError) as exc:self.call('/api/v1/unknown')

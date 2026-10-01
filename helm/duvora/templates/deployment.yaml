@@ -60,6 +60,31 @@ spec:
                   name: {{ include "duvora.secretName" . }}
                   key: keys.json
                   optional: true
+            {{- if .Values.netra.url }}
+            - name: DUVORA_NETRA_URL
+              value: {{ .Values.netra.url | quote }}
+            - name: DUVORA_NETRA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.netra.existingSecret | default (printf "%s-netra" (include "duvora.name" .)) }}
+                  key: netra-api-key
+            {{- if or .Values.netra.caCert .Values.netra.existingSecret }}
+            - name: DUVORA_NETRA_CA_FILE
+              value: /netra/netra-ca.crt
+            {{- end }}
+            - name: DUVORA_NETRA_DISCOVER
+              value: {{ ternary "1" "0" .Values.netra.discover | quote }}
+            {{- with .Values.netra.nodeMap }}
+            - name: DUVORA_NETRA_NODE_MAP
+              value: {{ . | quote }}
+            {{- end }}
+            - name: DUVORA_NETRA_ENFORCE
+              value: {{ ternary "1" "0" .Values.netra.enforce | quote }}
+            - name: DUVORA_NETRA_LEASE
+              value: {{ .Values.netra.leaseSeconds | quote }}
+            - name: DUVORA_NETRA_INTERVAL
+              value: {{ .Values.netra.intervalSeconds | quote }}
+            {{- end }}
             {{- if .Values.tls.enabled }}
             - name: DUVORA_TLS_CERT
               value: /tls/tls.crt
@@ -97,6 +122,11 @@ spec:
               mountPath: /tls
               readOnly: true
             {{- end }}
+            {{- if and .Values.netra.url (or .Values.netra.caCert .Values.netra.existingSecret) }}
+            - name: netra
+              mountPath: /netra
+              readOnly: true
+            {{- end }}
       volumes:
         - name: state
           persistentVolumeClaim:
@@ -107,4 +137,13 @@ spec:
         - name: tls
           secret:
             secretName: {{ include "duvora.tlsSecretName" . }}
+        {{- end }}
+        {{- if and .Values.netra.url (or .Values.netra.caCert .Values.netra.existingSecret) }}
+        - name: netra
+          secret:
+            secretName: {{ .Values.netra.existingSecret | default (printf "%s-netra" (include "duvora.name" .)) }}
+            items:
+              - key: netra-ca.crt
+                path: netra-ca.crt
+            optional: {{ empty .Values.netra.caCert }}
         {{- end }}

@@ -4,7 +4,15 @@ import { Badge, Section, Table, severityTone } from '../components/kit';
 import { useFleet, useResource } from '../store';
 import type { AlertRule } from '../types';
 
-const KIND = { metric: 'Metric threshold', health: 'Reported health', stale: 'Observation age (s)', job: 'Job outcome' };
+const KIND = {
+  metric: 'Metric threshold',
+  health: 'Reported health',
+  stale: 'Observation age (s)',
+  job: 'Job outcome',
+  ebpf: 'eBPF sensor',
+  isolation: 'Shadow would-block',
+  'isolation-enforce': 'Enforced drops',
+};
 
 export default function AlertRules() {
   const { isAdmin, toast } = useFleet();

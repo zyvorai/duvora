@@ -14,6 +14,8 @@ from . import __version__
 from .alerts import RESOLVED_RETENTION, AlertsMixin
 from .auth import AuthMixin
 from .common import Problem, canonical, finite, name
+from .ebpf import STAGES, EbpfMixin, replay
+from .netra import FLOW_WINDOW
 from .history import SAMPLE_RETENTION, HistoryMixin
 from .reports import ReportsMixin
 
@@ -22,7 +24,7 @@ PLAN_GRACE = 3600
 HOUSEKEEPING_INTERVAL = 60
 
 
-class Store(AuthMixin, HistoryMixin, AlertsMixin, ReportsMixin):
+class Store(AuthMixin, HistoryMixin, AlertsMixin, ReportsMixin, EbpfMixin):
     def __init__(self, path, demo=False):
         self.lock = threading.RLock()
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
@@ -42,6 +44,7 @@ class Store(AuthMixin, HistoryMixin, AlertsMixin, ReportsMixin):
         self.init_auth()
         self.init_history()
         self.init_alerts()
+        self.init_ebpf()
         if demo:
             self.seed()
 
@@ -105,11 +108,13 @@ class Store(AuthMixin, HistoryMixin, AlertsMixin, ReportsMixin):
                     d["health"] = "stale"
             return {"version": __version__, "demo": self.demo, "devices": devices,
                     "open_incidents": self.db.execute("SELECT count(*) FROM incidents WHERE state!='resolved'").fetchone()[0],
-                    "policies": self.rows("policies"), "jobs": self.rows("jobs"),
+                    "policies": self.rows("policies"), "jobs": self.rows("jobs"), "netra": dict(self.netra),
                     "audit": [dict(seq=r["seq"], **json.loads(r["body"])) for r in self.db.execute("SELECT seq,body FROM audit ORDER BY seq DESC LIMIT 200")],
                     "capabilities": {"simulator": "available" if self.demo else "disabled",
                     "linux_discovery": "read-only", "dpf_import": "read-only",
-                    "hardware_enforcement": "unavailable", "firmware_flash": "unavailable",
+                    "ebpf_telemetry": ("connected" if self.netra["connected"] else "disconnected") if self.netra["configured"] else "unavailable",
+                    "hardware_enforcement": "netra-gated" if self.netra["enforce_allowed"] and self.netra["isolation_supported"] else "unavailable",
+                    "firmware_flash": "unavailable",
                     "storage_offload": "unavailable"}}
 
     def report(self, actor, report):
@@ -150,6 +155,14 @@ class Store(AuthMixin, HistoryMixin, AlertsMixin, ReportsMixin):
                 "health": health, "metrics": metrics, "interfaces": interfaces,
                 "last_seen": time.time(), "version": (old["version"] + 1) if old else 1,
                 "mode": "observe", "services": [], "policy_ids": [], "capabilities": ["read-only"]}
+            if old and old.get("ebpf"):
+                # Netra-measured values and the eBPF probe survive inventory reports.
+                device["ebpf"], device["metrics_source"] = old["ebpf"], old.get("metrics_source")
+                device["metrics"] = {**{k: v for k, v in old["metrics"].items() if k not in metrics}, **metrics}
+                device["capabilities"] = ["read-only", "ebpf"]
+                device["mode"], device["policy_ids"] = old["mode"], old["policy_ids"]
+                if old.get("netra_isolation"):
+                    device["netra_isolation"] = old["netra_isolation"]
             self.put("devices", ident, device)
             self.record_sample(ident, metrics)
             if not old:
@@ -160,7 +173,7 @@ class Store(AuthMixin, HistoryMixin, AlertsMixin, ReportsMixin):
         if not isinstance(spec, dict):
             raise Problem("Plan specification must be an object")
         action = spec.get("action")
-        fields = {"isolate": {"policy"}, "release": set(), "deploy": {"service", "image"}, "upgrade": {"firmware"}}
+        fields = {"isolate": {"policy", "stage"}, "release": set(), "deploy": {"service", "image"}, "upgrade": {"firmware"}}
         if action not in fields:
             raise Problem("Action must be isolate, release, deploy or upgrade")
         if set(spec) - ({"action", "devices"} | fields[action]):
@@ -192,35 +205,54 @@ class Store(AuthMixin, HistoryMixin, AlertsMixin, ReportsMixin):
             if not isinstance(ports, list) or len(ports) > 64 or any(type(x) is not int or not 1 <= x <= 65535 for x in ports):
                 raise Problem("Ports must contain at most 64 integers from 1 to 65535")
             p["ports"] = sorted(set(ports))
+            if spec.setdefault("stage", "shadow") not in STAGES:
+                raise Problem("Stage must be shadow or enforce")
         return spec
 
-    def fingerprint(self, ids):
-        return hashlib.sha256(canonical([(x, self.device(x)["version"]) for x in sorted(ids)]).encode()).hexdigest()
+    def fingerprint(self, ids, netra=False):
+        # Agent reports bump versions constantly; a Netra plan only goes stale when its isolation changes.
+        state = (lambda d: [d.get("netra_isolation"), d.get("ebpf", {}).get("node")]) if netra else (lambda d: d["version"])
+        return hashlib.sha256(canonical([(x, state(self.device(x))) for x in sorted(ids)]).encode()).hexdigest()
 
     def plan(self, actor, spec):
         spec = self.validate_spec(spec)
         with self.transaction():
             devices = [self.device(x) for x in spec["devices"]]
-            blockers = []
-            for d in devices:
-                if not self.demo or d["source"] != "simulator":
-                    blockers.append(f"{d['id']}: hardware mutation adapter is unavailable")
-                if d["health"] not in {"healthy", "degraded"}:
-                    blockers.append(f"{d['id']}: device health is unknown")
-            p = {"id": secrets.token_urlsafe(24), "spec": spec, "expires": time.time() + 300,
-                "mode": "simulation" if all(d["source"] == "simulator" for d in devices) else "hardware-read-only",
+            netra = [d for d in devices if self.netra_node(d)]
+            if netra:
+                mode, confirmation, effects, blockers = self.netra_plan(spec, devices)
+                if len(netra) != len(devices):
+                    blockers.append("Do not mix Netra-backed devices with other devices in one plan")
+            else:
+                blockers = []
+                for d in devices:
+                    if not self.demo or d["source"] != "simulator":
+                        blockers.append(f"{d['id']}: hardware mutation adapter is unavailable")
+                    if d["health"] not in {"healthy", "degraded"}:
+                        blockers.append(f"{d['id']}: device health is unknown")
+                if spec.get("stage") == "enforce":
+                    blockers.append("Enforcement needs Netra-backed devices; simulated isolation has no stages")
+                mode = "simulation" if all(d["source"] == "simulator" for d in devices) else "hardware-read-only"
+                confirmation = "APPLY SIMULATION"
+                effects = {"isolate": "Simulate an allow-list policy; default deny within this model only",
+                           "release": "Remove all simulated isolation policies from selected devices",
+                           "deploy": "Record a simulated running service; no container is launched",
+                           "upgrade": "Simulate drain → update → verify; no firmware is flashed"}[spec["action"]]
+            p = {"id": secrets.token_urlsafe(24), "spec": spec, "expires": time.time() + 300, "mode": mode,
+                "confirmation": confirmation, "netra": bool(netra),
                 "blockers": blockers, "targets": [{"id": d["id"], "host": d["host"], "version": d["version"]} for d in devices],
-                "effects": {"isolate": "Simulate an allow-list policy; default deny within this model only",
-                            "release": "Remove all simulated isolation policies from selected devices",
-                            "deploy": "Record a simulated running service; no container is launched",
-                            "upgrade": "Simulate drain → update → verify; no firmware is flashed"}[spec["action"]]}
-            self.db.execute("INSERT INTO plans(id,actor,body,fingerprint,expires) VALUES(?,?,?,?,?)", (p["id"], actor, canonical(p), self.fingerprint(spec["devices"]), p["expires"]))
+                "effects": effects}
+            if spec["action"] == "isolate":
+                shadow = {d["id"]: {**replay(self.netra_flows[d["id"]], spec["policy"]["cidr"], spec["policy"]["ports"]),
+                                    "source": "replayed from Netra flow log", "window": FLOW_WINDOW}
+                          for d in devices if d["id"] in self.netra_flows}
+                if shadow:
+                    p["shadow"] = shadow
+            self.db.execute("INSERT INTO plans(id,actor,body,fingerprint,expires) VALUES(?,?,?,?,?)", (p["id"], actor, canonical(p), self.fingerprint(spec["devices"], p["netra"]), p["expires"]))
             self.event(actor, "plan.created", {"id": p["id"], "action": spec["action"], "devices": spec["devices"], "mode": p["mode"]})
             return p
 
     def apply(self, actor, ident, confirmation):
-        if confirmation != "APPLY SIMULATION":
-            raise Problem("Explicit confirmation must be APPLY SIMULATION")
         with self.transaction():
             row = self.db.execute("SELECT * FROM plans WHERE id=?", (ident,)).fetchone()
             if not row:
@@ -230,16 +262,27 @@ class Store(AuthMixin, HistoryMixin, AlertsMixin, ReportsMixin):
             if row["job"]:
                 return json.loads(self.db.execute("SELECT body FROM jobs WHERE id=?", (row["job"],)).fetchone()[0])
             p = json.loads(row["body"])
-            if not self.demo:
+            expected = p.get("confirmation", "APPLY SIMULATION")
+            if confirmation != expected:
+                raise Problem(f"Explicit confirmation must be {expected}")
+            if p.get("netra"):
+                if p["spec"].get("stage") == "enforce" and p["spec"]["action"] == "isolate":
+                    if not self.netra.get("enforce_allowed"):
+                        raise Problem("Enforcement is disabled on this server", 409)
+                    if self.killed():
+                        raise Problem("The kill switch is engaged", 409)
+                if not self.netra_client:
+                    raise Problem("Netra is not configured", 409)
+            elif not self.demo:
                 raise Problem("Simulation is disabled in this server", 409)
             if row["expires"] < time.time():
                 raise Problem("Plan expired; create a fresh preview", 409)
             if p["blockers"]:
                 raise Problem("Plan blocked: " + "; ".join(p["blockers"]), 409)
-            if self.fingerprint(p["spec"]["devices"]) != row["fingerprint"]:
+            if self.fingerprint(p["spec"]["devices"], p.get("netra", False)) != row["fingerprint"]:
                 raise Problem("Device state changed; create a fresh preview", 409)
             job = {"id": secrets.token_hex(12), "plan_id": ident, "state": "queued", "step": 0,
-                "mode": "simulation", "action": p["spec"]["action"], "spec": p["spec"], "created": time.time(),
+                "mode": "netra" if p.get("netra") else "simulation", "action": p["spec"]["action"], "spec": p["spec"], "created": time.time(),
                 "actor": actor, "before": [self.device(x) for x in p["spec"]["devices"]],
                 "policies_before": [x for x in self.rows("policies") if set(x["devices"]) & set(p["spec"]["devices"])], "events": []}
             # Prevent competing plans from starting against the same device.
@@ -248,7 +291,9 @@ class Store(AuthMixin, HistoryMixin, AlertsMixin, ReportsMixin):
                     raise Problem("A selected device already has an active job", 409)
             self.put("jobs", job["id"], job)
             self.db.execute("UPDATE plans SET job=? WHERE id=?", (job["id"], ident))
-            self.event(actor, "job.queued", {"id": job["id"], "action": job["action"], "mode": "simulation"})
+            self.event(actor, "job.queued", {"id": job["id"], "action": job["action"], "mode": job["mode"]})
+            if job["mode"] == "netra":
+                self.netra_wake.set()
             return job
 
     def tick(self):
@@ -256,7 +301,7 @@ class Store(AuthMixin, HistoryMixin, AlertsMixin, ReportsMixin):
             return
         with self.transaction():
             for job in self.rows("jobs"):
-                if job["state"] not in {"queued", "running"}:
+                if job["state"] not in {"queued", "running"} or job.get("mode", "simulation") != "simulation":
                     continue
                 job["state"] = "running"
                 steps = ["preflight", "drain", "update", "verify"] if job["action"] == "upgrade" else ["preflight", "reconcile", "verify"]
@@ -303,7 +348,10 @@ class Store(AuthMixin, HistoryMixin, AlertsMixin, ReportsMixin):
             if job["state"] == "rolled-back":
                 return job
             if job["state"] != "succeeded":
-                raise Problem("Only succeeded simulation jobs can be rolled back", 409)
+                raise Problem("Only succeeded jobs can be rolled back", 409)
+        if job.get("mode") == "netra":
+            return self.netra_rollback(actor, job)
+        with self.transaction():
             for d in job["before"]:
                 current = self.device(d["id"])
                 if current["version"] != d["version"] + 1:

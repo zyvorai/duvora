@@ -12,7 +12,7 @@ CREATE INDEX IF NOT EXISTS samples_device_ts ON samples(device, ts);
 WINDOWS = {"1h": (3600, 0), "24h": (86400, 300), "7d": (7 * 86400, 3600)}
 SAMPLE_INTERVAL = 10
 SAMPLE_RETENTION = 7 * 86400
-METRICS = ("throughput_gbps", "drops", "temperature_c", "link_gbps")
+METRICS = ("throughput_gbps", "drops", "temperature_c", "link_gbps", "pps", "blocked_pps", "tcp_retransmits_pm", "tcp_resets_pm")
 
 
 class HistoryMixin:

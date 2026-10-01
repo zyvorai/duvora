@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0
+
+- Netra bridge (`DUVORA_NETRA_URL`, `DUVORA_NETRA_API_KEY`): kernel-measured throughput, packets per second, drops with kernel drop reasons, TCP retransmits and resets, and top talkers, merged into devices and telemetry history. Devices map to Netra nodes by `DUVORA_NETRA_NODE_MAP`, host name, or discovery (`DUVORA_NETRA_DISCOVER=1`).
+- eBPF capability probe per node: kernel, BTF, attached programs, drop-reason and TCP event availability, node isolation.
+- Isolation stages on Netra nodes. Previews replay recent flow records against the allow-list; shadow counts what the kernel would block; enforce drops new egress flows outside the allow-list. Enforce requires a shadow run of the same allow-list, one device, `DUVORA_NETRA_ENFORCE=1`, and a typed `ENFORCE ON <device>` confirmation. Enforce leases (`DUVORA_NETRA_LEASE`, default 900 s) are renewed while Duvora runs; Netra falls back to shadow without them.
+- Kill switch (`POST /api/v1/ebpf/kill-switch`, console, `duvoractl kill-switch`) demotes every enforced node to shadow and blocks enforcement until released. Rollback of a Netra job never re-enforces. Changes made on Netra (lease lapse, deletion, another policy) are detected and recorded.
+- New alert rules: `tcp-retransmits`, `tcp-resets`, `ebpf-detached`, `isolation-would-block`, `isolation-blocked`. The shift briefing gains kernel observations.
+- Console: kernel observations on Telemetry, node isolation with promote / back to shadow / release and the kill switch on Isolation, eBPF probe on Capabilities, eBPF details in device inspect, shadow replay and stage in the plan dialog.
+- `duvoractl ebpf`, `shadow`, `enforce`, `kill-switch`.
+- Helm `netra.*` values; `deploy-remote.sh` connects to a Netra running in the same cluster (`DUVORA_NETRA=off` to skip).
+- Requires Netra with node isolation (`/api/v1/ebpf/node-isolation`, `netra_nodeiso`) for shadow and enforce; older Netra builds give telemetry only.
+
 ## 0.2.0
 
 - Sign in with a username and password (default `admin` / `Admin@321`, or `DUVORA_ADMIN_PASSWORD`). Passwords are scrypt-hashed; sessions are server-side, revocable, and carried in an HttpOnly `SameSite=Strict` cookie. Failed sign-ins are rate-limited.
